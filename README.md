@@ -2,6 +2,12 @@
 
 ```mermaid
 graph TD
+    subgraph Offline Document Ingestion Pipeline
+        DB1[Policy Documents / PDFs] --> DB2[Text Chunking & Preprocessing]
+        DB2 --> DB3[Bi-Encoder Embeddings <br/> all-MiniLM-L6-v2]
+        DB3 --> DB4[(Weaviate Vector DB <br/> InsuranceKnowledge Store)]
+    end
+
     A[User Prompt / Query] --> B[Slot-Filling & Regex Parsing]
 
     subgraph Pre-Processing Validation
@@ -20,7 +26,7 @@ graph TD
         subgraph ML & Explainability Subsystem
             G --> G1[Feature Pipeline & Baseline Ratios]
             G1 --> G2[XGBoost Model Inference]
-            G2 --> G3[Triage: Fraud Score vs. Optimal Cutoff]
+            G2 --> G3[Triage: Fraud Score vs. Cutoff]
             G3 --> H[Agent 2: Risk Analysis Agent]
             H --> H1[SHAP TreeExplainer Attributions]
         end
@@ -36,4 +42,5 @@ graph TD
         I3 --> J[Formatting Node]
     end
 
+    DB4 -. Document Index Lookup .-> I1
     J --> K[Final Investigation Report Output]
