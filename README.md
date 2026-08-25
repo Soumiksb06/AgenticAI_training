@@ -8,22 +8,21 @@ graph TD
     classDef aiModel fill:#ffb74d,stroke:#333,stroke-width:1px,color:#000;
     classDef db fill:#bcaaa4,stroke:#333,stroke-width:1px,color:#000;
 
-    %% User Interaction
+    %% User Interaction & Orchestration
     User((User)):::user
-    CLI[Async MCP Client<br/><i>insurance_multi_agent_client.py</i>]:::client<i>start_insurance_mcp.py</i>]:::mcpServer
-    Launcher -.->|Spawns & Monitors| RiskMCP
-    Launcher -.->|Spawns & Monitors| PolicyMCP
-    User((User)):::user
-    CLI[Async MCP Client<br/><i>insurance_multi_agent_client.py</i><br/>(Slot-Filling & Validation)]:::client" type="suggestion">
+    Launcher[MCP Launcher<br/><i>start_insurance_mcp.py</i>]:::mcpServer
+    CLI[Async MCP Client<br/><i>insurance_multi_agent_client.py</i><br/>(Slot-Filling & Validation)]:::client
+    
+    Launcher -.->|Spawns & Monitors Ports| RiskMCP
+    Launcher -.->|Spawns & Monitors Ports| PolicyMCP
     
     User -->|Inputs Claim Details<br/>via Interactive CLI| CLI
 
     %% MCP Network Layer
     subgraph Concurrent MCP Execution
         direction LR
-        RiskMCP[Risk MCP Server<br/><i>Port: 8011+ (FastMCP)</i>]:::mcpServer
-        PolicyMCP[Policy MCP Server<br/><i>Port: 8012+ (FastMCP)</i>]:::mcpServer<i>Port: 8011+ (FastMCP)</i><br/>Pydantic: ClaimInput]:::mcpServer
-        PolicyMCP[Policy MCP Server<br/><i>Port: 8012+ (FastMCP)</i><br/>Pydantic: PolicyRequest]:::mcpServer" type="suggestion">
+        RiskMCP[Risk MCP Server<br/><i>Port: 8011+ (FastMCP)</i><br/>Pydantic: ClaimInput]:::mcpServer
+        PolicyMCP[Policy MCP Server<br/><i>Port: 8012+ (FastMCP)</i><br/>Pydantic: PolicyRequest]:::mcpServer
     end
 
     CLI -->|asyncio.gather<br/>Tool: score_claim| RiskMCP
