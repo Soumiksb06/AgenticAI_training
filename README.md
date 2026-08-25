@@ -1,5 +1,4 @@
 ```mermaid
-
 graph TD
     %% Define Styles
     classDef user fill:#f9d0c4,stroke:#333,stroke-width:2px,color:#000;
@@ -11,7 +10,11 @@ graph TD
 
     %% User Interaction
     User((User)):::user
-    CLI[Async MCP Client<br/><i>insurance_multi_agent_client.py</i>]:::client
+    CLI[Async MCP Client<br/><i>insurance_multi_agent_client.py</i>]:::client<i>start_insurance_mcp.py</i>]:::mcpServer
+    Launcher -.->|Spawns & Monitors| RiskMCP
+    Launcher -.->|Spawns & Monitors| PolicyMCP
+    User((User)):::user
+    CLI[Async MCP Client<br/><i>insurance_multi_agent_client.py</i><br/>(Slot-Filling & Validation)]:::client" type="suggestion">
     
     User -->|Inputs Claim Details<br/>via Interactive CLI| CLI
 
@@ -19,7 +22,8 @@ graph TD
     subgraph Concurrent MCP Execution
         direction LR
         RiskMCP[Risk MCP Server<br/><i>Port: 8011+ (FastMCP)</i>]:::mcpServer
-        PolicyMCP[Policy MCP Server<br/><i>Port: 8012+ (FastMCP)</i>]:::mcpServer
+        PolicyMCP[Policy MCP Server<br/><i>Port: 8012+ (FastMCP)</i>]:::mcpServer<i>Port: 8011+ (FastMCP)</i><br/>Pydantic: ClaimInput]:::mcpServer
+        PolicyMCP[Policy MCP Server<br/><i>Port: 8012+ (FastMCP)</i><br/>Pydantic: PolicyRequest]:::mcpServer" type="suggestion">
     end
 
     CLI -->|asyncio.gather<br/>Tool: score_claim| RiskMCP
