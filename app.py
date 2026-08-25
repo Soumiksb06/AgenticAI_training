@@ -1,299 +1,435 @@
+import asyncio
+import json
 import os
 import re
-import json
-import warnings
-import pandas as pd
-import numpy as np
+from typing import Any, Dict
+
 import streamlit as st
+from fastmcp import Client
 
-# Import your multi-agent class from your existing code script
-# (Assuming your backend script is named insurance_multi_agent_chunking_indexing_copy_2.py)
-try:
-    from insurance_multi_agent_chunking_indexing_copy_2 import InsuranceAgentSystem
-except ImportError:
-    st.error("⚠️ Backend module not found. Ensure `insurance_multi_agent_chunking_indexing_copy_2.py` is in the same directory.")
-    st.stop()
+# Config & Ports
+RISK_SERVER_PORT = os.getenv("RISK_MCP_PORT", "8011")
+POLICY_SERVER_PORT = os.getenv("POLICY_MCP_PORT", "8012")
 
-# Suppress warnings
-warnings.filterwarnings("ignore")
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
+RISK_SERVER_URL = f"http://127.0.0.1:{RISK_SERVER_PORT}/mcp"
+POLICY_SERVER_URL = f"http://127.0.0.1:{POLICY_SERVER_PORT}/mcp"
 
-# =====================================================================
-# STREAMLIT PAGE CONFIGURATION
-# =====================================================================
 st.set_page_config(
-    page_title="Multi-Agent Claim Investigator",
+    page_title="Insurance MCP Claim Investigator",
     page_icon="🕵️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Custom Styling
-st.markdown("""
-    <style>
-    .main-header { font-size: 2.2rem; font-weight: 700; color: #1E3A8A; margin-bottom: 0.2rem; }
-    .sub-header { font-size: 1.05rem; color: #4B5563; margin-bottom: 1.5rem; }
-    .card { background-color: #F8FAFC; border-radius: 10px; padding: 1.2rem; border: 1px solid #E2E8F0; margin-bottom: 1rem; }
-    .metric-title { font-weight: 600; font-size: 0.9rem; color: #64748B; }
-    .high-risk { color: #DC2626; font-weight: 700; }
-    .low-risk { color: #16A34A; font-weight: 700; }
-    </style>
-""", unsafe_allow_html=True)
+
+# =====================================================================
+# 1. FIXED PRECEDENCE NLP EXTRACTION ENGINE
+# =====================================================================
+def extract_slots_from_text(prompt_text: str) -> Dict[str, Any]:
+    if not prompt_text:
+        return {}
+
+    text = prompt_text.lower().strip()
+    slots = {}
+
+    # 1. EXPLICIT INCOME
+    income_match = re.search(
+        r"(?:income|salary|earning|earns?)\s*[\$]?\s*(\d[\d,]*)", text
+    )
+    if income_match:
+        try:
+            slots["patient_income"] = float(income_match.group(1).replace(",", ""))
+        except ValueError:
+            pass
+
+    # 2. EXPLICIT AGE
+    age_match = re.search(
+        r"(?:age\s*|aged?\s*)(\d{1,2})\b|\b(\d{1,2})\s*(?:years?|yo)\b", text
+    )
+    if age_match:
+        try:
+            val = age_match.group(1) or age_match.group(2)
+            slots["patient_age"] = int(val)
+        except ValueError:
+            pass
+
+    # 3. EXPLICIT CLAIM AMOUNT
+    amount_match = re.search(
+        r"(?:need|claim|requiring|total|for|amount|val|value)\s*[\$]?\s*(\d[\d,]*)",
+        text,
+    )
+    if amount_match:
+        try:
+            slots["claim_amount"] = float(amount_match.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    else:
+        # Fallback: Currency patterns ($5000, 5k)
+        curr_match = re.search(
+            r"[\$]\s*(\d[\d,]*)(?:\s*k\b|\b)|(\b\d[\d,]*\s*k\b)", text
+        )
+        if curr_match:
+            raw_str = curr_match.group(0).replace("$", "").replace(",", "").strip()
+            multiplier = 1000 if "k" in raw_str else 1
+            clean_num = float(re.sub(r"[^\d.]", "", raw_str)) * multiplier
+            slots["claim_amount"] = clean_num
+        else:
+            # Fallback: Find unassigned numbers not matched to income or age
+            all_nums = re.findall(r"\b\d[\d,]*\b", text)
+            assigned_nums = set()
+            if "patient_income" in slots:
+                assigned_nums.add(str(int(slots["patient_income"])))
+            if "patient_age" in slots:
+                assigned_nums.add(str(slots["patient_age"]))
+
+            for n_str in all_nums:
+                clean_n = n_str.replace(",", "")
+                if clean_n not in assigned_nums:
+                    val = float(clean_n)
+                    if val > 100 and val != slots.get("patient_income", 0):
+                        slots["claim_amount"] = val
+                        break
+
+    # 4. EXPLICIT CLAIM TYPE
+    if re.search(r"\b(outp|outpatient|clinic|daycare)\b", text):
+        slots["claim_type"] = "Outpatient"
+    elif re.search(r"\b(inp|inpatient|admitted|hospitalized)\b", text):
+        slots["claim_type"] = "Inpatient"
+    elif re.search(r"\b(emergency|er|urgent)\b", text):
+        slots["claim_type"] = "Emergency"
+    elif "brain tumor" in text or "surgery" in text:
+        slots["claim_type"] = "Inpatient"
+
+    # 5. EXPLICIT SPECIALTY
+    if re.search(r"\b(ortho|orthopedics?|bone)\b", text):
+        slots["provider_specialty"] = "Orthopedics"
+    elif re.search(r"\b(neuro|neurology)\b", text):
+        slots["provider_specialty"] = "Neurology"
+    elif re.search(r"\b(pedia|pediatric|child)\b", text):
+        slots["provider_specialty"] = "Pediatrics"
+    elif re.search(r"\b(cardio|cardiology|heart)\b", text):
+        slots["provider_specialty"] = "Cardiology"
+    elif re.search(r"\b(onco|oncology|cancer|tumor)\b", text):
+        slots["provider_specialty"] = "Oncology"
+    elif "brain" in text:
+        slots["provider_specialty"] = "Neurology"
+
+    # 6. LOCATION
+    if "rural" in text:
+        slots["provider_location"] = "Rural"
+    elif "urban" in text:
+        slots["provider_location"] = "Urban"
+
+    return slots
 
 
 # =====================================================================
-# CACHED SYSTEM INITIALIZATION
+# 2. ASYNC MCP CLIENT WITH LIVE PROGRESS TRACKING
 # =====================================================================
-@st.cache_resource(show_spinner="🚀 Initializing Multi-Agent RAG & ML System (Loading LLM, Embeddings, Weaviate)...")
-def load_investigator_system():
-    return InsuranceAgentSystem(use_local_llm=True)
+def _as_dict(result: Any) -> Dict[str, Any]:
+    if isinstance(result, dict):
+        return result
+    if hasattr(result, "structured_content") and result.structured_content is not None:
+        return result.structured_content
+    if hasattr(result, "data") and isinstance(result.data, dict):
+        return result.data
+    if hasattr(result, "content") and result.content:
+        for item in result.content:
+            if hasattr(item, "text"):
+                try:
+                    parsed = json.loads(item.text)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+    return {}
 
-try:
-    system = load_investigator_system()
-except Exception as e:
-    st.error(f"Failed to load backend system: {str(e)}")
-    st.stop()
 
-# Initialize session state for form persistence
-if "claim_payload" not in st.session_state:
-    st.session_state.claim_payload = {}
-if "user_query" not in st.session_state:
-    st.session_state.user_query = ""
+async def call_mcp_tool(url: str, tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        async with Client(url) as client:
+            res = await client.call_tool(tool_name, payload)
+            return _as_dict(res)
+    except Exception as exc:
+        return {"error": f"Failed to connect to {url}: {str(exc)}"}
+
+
+async def run_mcp_investigation(
+    claim_payload: Dict[str, Any], policy_query: str, status_box
+):
+    claim_amount = claim_payload.get("claim_amount", 0.0)
+
+    # Step 1: Auto-Routing Decision
+    status_box.update(
+        label="⚙️ Step 1/3: Analyzing Intent & Routing Query...", state="running"
+    )
+    await asyncio.sleep(0.3)
+
+    if claim_amount <= 0.0:
+        # Policy-Only Route
+        status_box.write("🔀 **Auto-Routing Verdict**: Claim amount = `$0.00`. Routing strictly to **Policy Agent**.")
+        status_box.write(f"📡 **MCP Server**: `Insurance Policy MCP` (`{POLICY_SERVER_URL}`)")
+        status_box.write("🛠️ **MCP Tool Called**: `lookup_policy`")
+
+        status_box.update(
+            label=f"📡 Step 2/2: Executing Policy MCP Tool ('lookup_policy' on Port {POLICY_SERVER_PORT})...",
+            state="running",
+        )
+
+        policy_res = await call_mcp_tool(
+            POLICY_SERVER_URL,
+            "lookup_policy",
+            {
+                "request": {
+                    "claim_type": claim_payload.get("claim_type", "Outpatient"),
+                    "procedure_code": claim_payload.get("procedure_code", "AA395"),
+                    "provider_specialty": claim_payload.get("provider_specialty", "General Practice"),
+                    "question": policy_query or "What policy rules apply to this treatment?",
+                    "claim_amount": 5000.0,
+                    "patient_age": claim_payload.get("patient_age", 45),
+                    "patient_income": claim_payload.get("patient_income", 35000.0),
+                }
+            },
+        )
+
+        status_box.update(
+            label="✅ Policy Guidance Retrieved Successfully!", state="complete"
+        )
+        return {"mode": "POLICY_ONLY", "risk": None, "policy": policy_res}
+
+    else:
+        # Dual Execution Route
+        status_box.write(f"🔀 **Auto-Routing Verdict**: Claim amount = `${claim_amount:,.2f}` (> $0.00). Triggering **Dual Agent Pipeline**.")
+        status_box.write(f"📡 **Task 1**: Calling `Insurance Risk MCP` (`{RISK_SERVER_URL}`) | 🛠️ Tool: `score_claim`")
+        status_box.write(f"📡 **Task 2**: Calling `Insurance Policy MCP` (`{POLICY_SERVER_URL}`) | 🛠️ Tool: `lookup_policy`")
+
+        status_box.update(
+            label="⚡ Step 2/3: Concurrently Dispatching Requests via asyncio.gather...",
+            state="running",
+        )
+
+        risk_task = call_mcp_tool(
+            RISK_SERVER_URL,
+            "score_claim",
+            {"claim": claim_payload},
+        )
+        policy_task = call_mcp_tool(
+            POLICY_SERVER_URL,
+            "lookup_policy",
+            {
+                "request": {
+                    "claim_type": claim_payload.get("claim_type", "Outpatient"),
+                    "procedure_code": claim_payload.get("procedure_code", "AA395"),
+                    "provider_specialty": claim_payload.get("provider_specialty", "General Practice"),
+                    "question": policy_query or f"Policy rules for {claim_payload.get('claim_type')} claim ${claim_amount:,.2f}",
+                    "claim_amount": claim_amount,
+                    "patient_age": claim_payload.get("patient_age", 45),
+                    "patient_income": claim_payload.get("patient_income", 35000.0),
+                    "patient_id": claim_payload.get("patient_id", "P-DEFAULT"),
+                    "provider_id": claim_payload.get("provider_id", "PRV-201"),
+                }
+            },
+        )
+
+        risk_res, policy_res = await asyncio.gather(risk_task, policy_task)
+
+        status_box.update(
+            label="✅ Dual MCP Tasks Completed & Synthesized!", state="complete"
+        )
+        return {"mode": "DUAL_EXECUTION", "risk": risk_res, "policy": policy_res}
+
 
 # =====================================================================
-# SIDEBAR
+# 3. STREAMLIT UI DASHBOARD
 # =====================================================================
+st.title("🕵️ Insurance Claim Investigator & Policy Advisor")
+st.caption("Powered by FastMCP, LangGraph Auto-Routing, and Multi-Agent RAG")
+
+# Sidebar Configuration
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/shield-search.png", width=70)
-    st.title("System Status")
-    
-    st.success("🟢 ML Fraud Model Loaded")
-    st.success("🟢 Weaviate Knowledge Base Ready")
-    st.success("🟢 Local Qwen2.5-1.5B LLM Ready")
-    
-    st.divider()
-    st.markdown("**Model Parameters:**")
-    
-    # Safe attribute access with fallbacks
-    threshold = getattr(system, 'optimal_threshold', 0.9803)
-    global_mean = getattr(system, 'global_mean', 5014.20)
-    proc_map = getattr(system, 'procedure_avg_map', {})
-    spec_map = getattr(system, 'specialty_avg_map', {})
-
-    st.write(f"• **Decision Threshold:** `{threshold:.2%}`")
-    st.write(f"• **Global Dataset Mean:** `${global_mean:,.2f}`")
-    st.write(f"• **Indexed Procedures:** `{len(proc_map)}`")
-    st.write(f"• **Indexed Specialties:** `{len(spec_map)}`")
-    
-    st.divider()
-    if st.button("🔄 Clear System Cache / Reset", use_container_width=True):
-        st.cache_resource.clear()
+    st.header("⚙️ MCP Server Cluster")
+    st.text_input("Risk MCP Endpoint", RISK_SERVER_URL, disabled=True)
+    st.text_input("Policy MCP Endpoint", POLICY_SERVER_URL, disabled=True)
+    st.markdown("---")
+    st.markdown("### 💡 Quick Examples")
+    if st.button("Example 1: Brain Tumor Claim ($5k)"):
+        st.session_state["user_prompt"] = (
+            "I am having brain tumor, need 5000 income 30000 from rural ortho age 21 outp"
+        )
+        st.rerun()
+    if st.button("Example 2: General Policy Query"):
+        st.session_state["user_prompt"] = "best insurance to take?"
         st.rerun()
 
+# User Text Input
+default_prompt = st.session_state.get("user_prompt", "best insurance to take?")
 
-# =====================================================================
-# HEADER
-# =====================================================================
-st.markdown('<div class="main-header">🚀 Dynamic Multi-Agent Claim Investigator</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-header">Production RAG & Tabular ML System for Insurance Fraud Triage, Explainability & Policy QA</div>', unsafe_allow_html=True)
+user_query = st.text_area(
+    "💬 Enter Natural Language Query or Claim Details:",
+    value=default_prompt,
+    height=90,
+)
 
+# Extract slots
+extracted_slots = extract_slots_from_text(user_query)
 
-# =====================================================================
-# INPUT INTERFACE (TABS)
-# =====================================================================
-tab1, tab2 = st.tabs(["💬 Single-Prompt Investigator", "📝 Structured Claim Form"])
+# Display Detected Slot Badges
+st.markdown("##### 🔍 Detected Parameters from Prompt:")
+if extracted_slots:
+    badge_cols = st.columns(len(extracted_slots))
+    for idx, (k, v) in enumerate(extracted_slots.items()):
+        badge_cols[idx].info(f"**{k}**: `{v}`")
+else:
+    st.caption("No specific claim attributes detected. Query will route to Policy RAG.")
 
-claim_payload = st.session_state.claim_payload
-user_query = st.session_state.user_query
+# Determine if this prompt has explicit claim details
+has_claim_details = bool(
+    extracted_slots and extracted_slots.get("claim_amount", 0.0) > 0.0
+)
 
-with tab1:
-    st.markdown("Enter a natural language description of a claim or a general policy question.")
-    prompt_input = st.text_area(
-        "Claim Description / Policy Question:",
-        placeholder="e.g., 'claim $10,000 for pedia, income 80000, age 21, outpatient' or 'What are the annual coverage limits for inpatient stay?'",
-        height=100
-    )
-    
-    if prompt_input:
-        st.session_state.user_query = prompt_input.strip()
-        user_query = st.session_state.user_query
-        # Parse claim details from text
-        amt_match = re.search(r'(?:[\$₹]\s*|\b)(\d[\d,]*)(?:\s*k\b|\b)', user_query, re.IGNORECASE)
-        if amt_match:
-            try:
-                raw_val = amt_match.group(1).replace(',', '')
-                val = float(raw_val)
-                if 'k' in amt_match.group(0).lower() and val < 1000:
-                    val *= 1000
-                if val > 0:
-                    st.session_state.claim_payload["ClaimAmount"] = val
-            except ValueError:
-                pass
+# Refinement Form (Auto-expands ONLY if claim parameters were detected)
+with st.expander(
+    "⚙️ Refine Extracted Parameters (Slot-Filling Form)",
+    expanded=has_claim_details,
+):
+    col1, col2, col3, col4 = st.columns(4)
 
-        if st.session_state.claim_payload.get("ClaimAmount", 0) > 0:
-            code, spec = system.resolve_procedure_code(user_query)
-            st.session_state.claim_payload["ProcedureCode"] = code
-            st.session_state.claim_payload["ProviderSpecialty"] = spec
-            
-            # Extract Income
-            inc_match = re.search(r'(?:income|salary|earning)[^\d]*([\$₹]?\s*\d[\d,]*)', user_query, re.IGNORECASE)
-            if inc_match:
-                try:
-                    st.session_state.claim_payload["PatientIncome"] = float(inc_match.group(1).replace('$', '').replace(',', ''))
-                except ValueError:
-                    st.session_state.claim_payload["PatientIncome"] = 35000.0
-            else:
-                st.session_state.claim_payload["PatientIncome"] = 35000.0
+    # Dynamic key based on prompt to force value refresh on query change
+    prompt_hash = str(hash(user_query))
 
-            # Extract Age
-            age_match = re.search(r'(\d{1,2})\s*(?:years old|yo|age)', user_query, re.IGNORECASE)
-            if age_match:
-                try:
-                    st.session_state.claim_payload["PatientAge"] = float(age_match.group(1))
-                except ValueError:
-                    st.session_state.claim_payload["PatientAge"] = 45.0
-            else:
-                st.session_state.claim_payload["PatientAge"] = 45.0
-
-            st.session_state.claim_payload["ClaimType"] = "Inpatient" if "inpatient" in user_query.lower() else "Outpatient"
-
-with tab2:
-    st.markdown("Fill in specific claim attributes directly for precise machine learning evaluation.")
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        f_amt = st.number_input(
+    with col1:
+        form_amount = st.number_input(
             "Claim Amount ($)",
             min_value=0.0,
-            value=st.session_state.claim_payload.get("ClaimAmount", 10000.0),
-            step=500.0
+            value=float(extracted_slots.get("claim_amount", 0.0)),
+            step=500.0,
+            key=f"amt_{prompt_hash}",
         )
-        f_type = st.selectbox(
+        claim_type_opts = ["Outpatient", "Inpatient", "Emergency", "Other"]
+        default_type = extracted_slots.get("claim_type", "Outpatient")
+        form_type = st.selectbox(
             "Claim Type",
-            ["Outpatient", "Inpatient"],
-            index=0 if st.session_state.claim_payload.get("ClaimType", "Outpatient") == "Outpatient" else 1
-        )
-    with c2:
-        f_spec = st.text_input(
-            "Procedure / Specialty",
-            value=st.session_state.claim_payload.get("ProviderSpecialty", "Pediatrics")
-        )
-        f_income = st.number_input(
-            "Patient Annual Income ($)",
-            min_value=0.0,
-            value=st.session_state.claim_payload.get("PatientIncome", 80000.0),
-            step=5000.0
-        )
-    with c3:
-        f_age = st.number_input(
-            "Patient Age",
-            min_value=0,
-            max_value=120,
-            value=int(st.session_state.claim_payload.get("PatientAge", 21))
-        )
-        f_pid = st.text_input(
-            "Patient ID",
-            value=st.session_state.claim_payload.get("PatientID", "PAT-101")
+            claim_type_opts,
+            index=claim_type_opts.index(default_type) if default_type in claim_type_opts else 0,
+            key=f"type_{prompt_hash}",
         )
 
-    f_query = st.text_input(
-        "Policy Question (Optional):",
-        value=st.session_state.user_query or "What are the coverage limits for this procedure?"
+    with col2:
+        form_age = st.number_input(
+            "Patient Age",
+            min_value=18,
+            max_value=100,
+            value=int(extracted_slots.get("patient_age", 42)),
+            key=f"age_{prompt_hash}",
+        )
+        form_income = st.number_input(
+            "Patient Income ($)",
+            min_value=0.0,
+            value=float(extracted_slots.get("patient_income", 35000.0)),
+            step=1000.0,
+            key=f"inc_{prompt_hash}",
+        )
+
+    with col3:
+        form_specialty = st.text_input(
+            "Provider Specialty",
+            value=extracted_slots.get("provider_specialty", "General Practice"),
+            key=f"spec_{prompt_hash}",
+        )
+        location_opts = ["Urban", "Rural"]
+        default_loc = extracted_slots.get("provider_location", "Urban")
+        form_location = st.selectbox(
+            "Provider Location",
+            location_opts,
+            index=location_opts.index(default_loc) if default_loc in location_opts else 0,
+            key=f"loc_{prompt_hash}",
+        )
+
+    with col4:
+        form_proc_code = st.text_input("Procedure Code", value="AA395", key=f"proc_{prompt_hash}")
+        form_claim_id = st.text_input("Claim ID", value="CLM-1042", key=f"cid_{prompt_hash}")
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# Execution Action Button
+if st.button("🚀 Run Multi-Agent Investigation", type="primary", use_container_width=True):
+    # Construct Payload
+    claim_payload = {
+        "claim_id": form_claim_id,
+        "claim_amount": form_amount,
+        "claim_type": form_type,
+        "procedure_code": form_proc_code,
+        "provider_specialty": form_specialty,
+        "patient_age": form_age,
+        "patient_income": form_income,
+        "patient_id": "PAT-441",
+        "provider_id": "PROV-88",
+        "claim_status": "Submitted",
+        "diagnosis_code": "D001",
+        "provider_location": form_location,
+        "claim_submission_method": "Electronic",
+    }
+
+    # Interactive Status Tracker
+    status_box = st.status("🚀 Initializing MCP Agent Pipeline...", expanded=True)
+
+    # Run Investigation
+    results = asyncio.run(
+        run_mcp_investigation(claim_payload, user_query, status_box)
     )
 
-    if st.button("Submit Form Claim", type="secondary"):
-        code, spec = system.resolve_procedure_code(f_spec)
-        st.session_state.claim_payload = {
-            "ClaimAmount": f_amt,
-            "ClaimType": f_type,
-            "ProcedureCode": code,
-            "ProviderSpecialty": spec,
-            "PatientIncome": f_income,
-            "PatientAge": f_age,
-            "PatientID": f_pid
-        }
-        st.session_state.user_query = f_query
-        st.success("✅ Claim saved. Now click Run Investigation Pipeline.")
+    st.markdown("---")
 
-# =====================================================================
-# INVESTIGATION EXECUTION & DASHBOARD DISPLAY
-# =====================================================================
-st.divider()
-
-if st.button("🚀 Run Investigation Pipeline", type="primary", use_container_width=True):
-    has_query = bool(st.session_state.user_query and st.session_state.user_query.strip())
-    has_claim_amount = bool(st.session_state.claim_payload.get("ClaimAmount", 0) > 0)
-    
-    if not has_query and not has_claim_amount:
-        st.warning("Please enter a query or claim details to investigate.")
+    # Display Auto-Routing Banner
+    if results["mode"] == "POLICY_ONLY":
+        st.info("ℹ️ **Auto-Routing**: Claim Amount = `$0.00`. Routed strictly to **Policy Agent (RAG)**.")
     else:
-        with st.spinner("Multi-Agent System Processing (Router ➔ ML Triage ➔ SHAP ➔ Hybrid RAG)..."):
-            # Execute LangGraph Pipeline
-            initial_state = {
-                "raw_claim": st.session_state.claim_payload,
-                "user_query": st.session_state.user_query,
-                "target_route": "",
-                "dispersion_metrics": {},
-                "ml_probability": 0.0,
-                "ml_prediction": 0,
-                "triage_status": "",
-                "risk_explanation": "",
-                "retrieved_docs": [],
-                "rag_generated_answer": "",
-                "needs_clarification": False,
-                "final_report": ""
-            }
-            results = system.graph.invoke(initial_state)
+        st.success("⚡ **Auto-Routing**: Claim Amount > `$0.00`. Executed **Dual Agent Concurrent Pipeline**.")
 
-        # -------------------------------------------------------------
-        # DISPLAY RESULTS
-        # -------------------------------------------------------------
-        st.subheader("🕵️ Investigation Results")
+    res_col1, res_col2 = st.columns(2)
 
-        # AGENT 1 & 2: ML TRIAGE & RISK EXPLAINABILITY (Only if Claim Evaluated)
-        if results.get("triage_status"):
-            st.markdown("### Agent 1 & 2: ML Triage & Risk Analysis")
-            col1, col2 = st.columns([1, 1])
+    # Risk Agent Results Column
+    with res_col1:
+        st.subheader("🛡️ Risk Analysis & Triage")
+        st.caption(f"Server: `Insurance Risk MCP` | Tool: `score_claim`")
+        risk_data = results.get("risk")
 
-            with col1:
-                st.markdown('<div class="card">', unsafe_allow_html=True)
-                prob = results["ml_probability"]
-                cutoff = system.optimal_threshold
-                
-                if prob >= cutoff:
-                    st.error(f"### {results['triage_status']}")
-                else:
-                    st.success(f"### {results['triage_status']}")
+        if not risk_data:
+            st.warning("Risk assessment bypassed (Policy-only mode).")
+        elif "error" in risk_data:
+            st.error(risk_data["error"])
+        else:
+            risk_level = risk_data.get("risk_level", "UNKNOWN")
+            score = risk_data.get("risk_score", 0.0)
+            cutoff = risk_data.get("decision_cutoff", 0.0)
 
-                st.metric("Fraud Probability Score", f"{prob:.2%}", delta=f"{prob - cutoff:+.2%} vs Cutoff")
-                st.progress(min(prob, 1.0))
-                
-                disp = results.get("dispersion_metrics", {})
-                if disp:
-                    st.markdown("**Statistical Dispersion Metrics:**")
-                    st.write(f"• **Code/Specialty:** `{disp.get('procedure_code')}` ({disp.get('provider_specialty')})")
-                    st.write(f"• **Dataset Peer Mean:** `${disp.get('peer_avg'):,.2f}`")
-                    st.write(f"• **Peer Deviation:** `{disp.get('peer_deviation_pct'):+.2f}%` ({st.session_state.claim_payload.get('ClaimAmount',0)/disp.get('peer_avg',1):.2f}x mean)")
-                st.markdown('</div>', unsafe_allow_html=True)
+            if risk_level == "HIGH_RISK":
+                st.error(f"**Verdict**: {risk_level} (Score: {score:.2%})")
+            else:
+                st.success(f"**Verdict**: {risk_level} (Score: {score:.2%})")
 
-            with col2:
-                st.markdown('<div class="card">', unsafe_allow_html=True)
-                st.markdown("### Agent 2: SHAP Feature Attributions")
-                st.text(results.get("risk_explanation", "No SHAP explanation available."))
-                st.markdown('</div>', unsafe_allow_html=True)
+            st.progress(min(score, 1.0))
+            st.caption(f"Decision Threshold Cutoff: {cutoff:.2%}")
 
-        # AGENT 3: POLICY AGENT (TWO-STAGE HYBRID RAG)
-        st.markdown("### Agent 3: Policy RAG & Guidance")
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown(results.get("rag_generated_answer", "No policy answer generated."))
-        st.markdown('</div>', unsafe_allow_html=True)
+            with st.expander("🔬 SHAP Feature Contributions", expanded=True):
+                st.text(risk_data.get("risk_explanation", "No explanation available."))
 
-        # REFERENCED DOCUMENTS ACCORDION
-        docs = results.get("retrieved_docs", [])
-        if docs:
-            with st.expander("📑 View Referenced Policy Documents & Cross-Encoder Scores", expanded=False):
-                for idx, doc in enumerate(docs, 1):
-                    st.markdown(f"**Document #{idx}: {doc['source_file']}** (Category: `{doc['category']}`)")
-                    st.progress(float(doc['rerank_score']) / 100.0)
-                    st.caption(f"Cross-Encoder Match Score: {doc['rerank_score']:.2f}% | Hybrid Search Score: {doc['hybrid_score']:.4f}")
-                    st.info(f'"{doc["snippet"]}"')
-                    st.divider()
+    # Policy Agent Results Column
+    with res_col2:
+        st.subheader("📜 Policy Guidance (RAG)")
+        st.caption(f"Server: `Insurance Policy MCP` | Tool: `lookup_policy`")
+        policy_data = results.get("policy")
+
+        if not policy_data:
+            st.warning("No policy response available.")
+        elif "error" in policy_data:
+            st.error(policy_data["error"])
+        else:
+            st.markdown(f"**Grounded Answer:**\n{policy_data.get('answer', 'N/A')}")
+
+            retrieved_docs = policy_data.get("retrieved_docs", [])
+            if retrieved_docs:
+                with st.expander(f"📑 Grounded Policy Excerpts ({len(retrieved_docs)})", expanded=True):
+                    for doc in retrieved_docs:
+                        st.markdown(f"- **Source**: `{doc.get('source_file')}` | **Re-Rank Score**: {doc.get('rerank_score', 0):.2f}%")
+                        st.caption(f"\"{doc.get('snippet')}\"")
