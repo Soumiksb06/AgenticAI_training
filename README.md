@@ -128,7 +128,9 @@ flowchart LR
     class RISK_AGENT,MODEL,SHAP risk;
     class POLICY_AGENT,EMBED,DB,RERANK,LLM rag;
     class STATUS,RESULT result;
+
 ```
+
 ---
 
 # AgenticAI_training
@@ -182,20 +184,21 @@ Auto-Routing
       Risk MCP + Policy MCP
          │
          ├── Risk MCP
-         │     ↓
+         │    ↓
          │  ML Fraud Scoring
-         │     ↓
+         │    ↓
          │  SHAP Explanation
          │
          └── Policy MCP
-               ↓
-            Policy RAG
-               ↓
+              ↓
+           Policy RAG
+              ↓
          Cross-Encoder Reranking
-               ↓
-             Qwen LLM
-               ↓
+              ↓
+            Qwen LLM
+              ↓
        Consolidated Investigation Result
+
 ```
 
 For claim requests, the risk and policy services can run concurrently through `asyncio.gather()`.
@@ -223,6 +226,7 @@ AgenticAI_training/
 └── output/
     ├── fraud_detection_model.pkl
     └── processed_claim_features.csv
+
 ```
 
 ---
@@ -234,6 +238,7 @@ AgenticAI_training/
 ```bash
 git clone https://github.com/tigersb06/AgenticAI_training.git
 cd AgenticAI_training
+
 ```
 
 ## 3.2 Fork
@@ -248,6 +253,7 @@ To maintain your own GitHub copy:
 ```bash
 git clone https://github.com/<YOUR_USERNAME>/AgenticAI_training.git
 cd AgenticAI_training
+
 ```
 
 Optional: add the original repository as `upstream`:
@@ -255,6 +261,7 @@ Optional: add the original repository as `upstream`:
 ```bash
 git remote add upstream https://github.com/tigersb06/AgenticAI_training.git
 git remote -v
+
 ```
 
 ---
@@ -268,6 +275,7 @@ A clean virtual environment is recommended.
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
+
 ```
 
 ## macOS / Linux
@@ -275,12 +283,14 @@ python -m venv .venv
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+
 ```
 
 Upgrade `pip`:
 
 ```bash
 python -m pip install --upgrade pip
+
 ```
 
 ---
@@ -291,6 +301,7 @@ Install the project dependencies from `requirements.txt`:
 
 ```bash
 pip install -r requirements.txt
+
 ```
 
 The environment covers the major components used by the project, including:
@@ -310,6 +321,7 @@ transformers
 streamlit
 fastmcp
 pypdf
+
 ```
 
 ---
@@ -323,24 +335,28 @@ Check Docker:
 ```bash
 docker --version
 docker ps
+
 ```
 
 If your existing Weaviate container already exists:
 
 ```bash
 docker start <weaviate-container-name>
+
 ```
 
 If the project uses Docker Compose:
 
 ```bash
 docker compose up -d
+
 ```
 
 Verify that the container is running:
 
 ```bash
 docker ps
+
 ```
 
 Weaviate needs to be available before the policy RAG service is started.
@@ -349,6 +365,7 @@ The RAG system uses a collection named:
 
 ```text
 InsuranceKnowledge
+
 ```
 
 ---
@@ -365,6 +382,7 @@ Run the project's PDF generation utility:
 
 ```bash
 python generate_rag_pdf.py
+
 ```
 
 ## Option B — Add PDFs Manually
@@ -379,16 +397,47 @@ rag/
     ├── claim_limits.pdf
     ├── required_documentation.pdf
     └── policy_guidelines.pdf
+
 ```
 
 ---
 
-# 8. Build or Refresh the RAG Index
+# 8. Train the Fraud Detection Model
+
+Run:
+
+```bash
+python train_fraud_model.py
+
+```
+
+The training script reads:
+
+```text
+Health Insurance Fraud Claims.xlsx
+
+```
+
+and builds the ML artifacts used during runtime under `output/`:
+
+```text
+output/
+├── fraud_detection_model.pkl
+└── processed_claim_features.csv
+
+```
+
+Train the fraud model **before starting the FastMCP services or Streamlit app**.
+
+---
+
+# 9. Build or Refresh the RAG Index
 
 Once the PDFs are available, run the project's chunking and indexing pipeline:
 
 ```bash
 python insurance_multi_agent_chunking_indexing_copy_2.py
+
 ```
 
 The indexing flow is:
@@ -403,6 +452,7 @@ SentenceTransformer
     ↓
 Weaviate
 (InsuranceKnowledge)
+
 ```
 
 At query time, retrieval follows:
@@ -416,33 +466,8 @@ Hybrid Search
 Cross-Encoder Reranking
     ↓
 Qwen LLM Synthesizer
+
 ```
-
----
-
-# 9. Train the Fraud Detection Model
-
-Run:
-
-```bash
-python train_fraud_model.py
-```
-
-The training script reads:
-
-```text
-Health Insurance Fraud Claims.xlsx
-```
-
-and builds the ML artifacts used during runtime under `output/`:
-
-```text
-output/
-├── fraud_detection_model.pkl
-└── processed_claim_features.csv
-```
-
-Train the fraud model **before starting the FastMCP services or Streamlit app**.
 
 ---
 
@@ -452,13 +477,14 @@ Launch both FastMCP microservices using the launcher script:
 
 ```bash
 python start_insurance_mcp.py
+
 ```
 
 Expected service mapping:
 
-| Service                     |  Port | Tool            |
-| --------------------------- | ----: | --------------- |
-| Insurance Risk MCP Server   | 8011+ | `score_claim`   |
+| Service | Port | Tool |
+| --- | --- | --- |
+| Insurance Risk MCP Server | 8011+ | `score_claim` |
 | Insurance Policy MCP Server | 8012+ | `lookup_policy` |
 
 The launcher is responsible for starting and monitoring the MCP services.
@@ -475,6 +501,7 @@ In a separate terminal, with the virtual environment activated:
 
 ```bash
 streamlit run streamlit_app.py
+
 ```
 
 Features include:
@@ -497,6 +524,7 @@ Alternatively, run the interactive CLI:
 
 ```bash
 python insurance_multi_agent_client.py
+
 ```
 
 The CLI supports:
@@ -518,42 +546,48 @@ Follow this order for a clean end-to-end run.
 
 ```bash
 docker start <weaviate-container-name>
+
 ```
 
 Or:
 
 ```bash
 docker compose up -d
+
 ```
 
 ---
 
-### Step 2 — Build or Refresh the Policy RAG Index
-
-Generate the policy PDFs:
-
-```bash
-python generate_rag_pdf.py
-```
-
-Then index them:
-
-```bash
-python insurance_multi_agent_chunking_indexing_copy_2.py
-```
-
----
-
-### Step 3 — Train the Fraud ML Model
+### Step 2 — Train the Fraud ML Model
 
 ```bash
 python train_fraud_model.py
+
 ```
 
 This creates:
 
 ```text
 output/fraud_detection_model.pkl
+
+```
+
+---
+
+### Step 3 — Build or Refresh the Policy RAG Index
+
+Generate the policy PDFs:
+
+```bash
+python generate_rag_pdf.py
+
+```
+
+Then index them:
+
+```bash
+python insurance_multi_agent_chunking_indexing_copy_2.py
+
 ```
 
 ---
@@ -562,6 +596,7 @@ output/fraud_detection_model.pkl
 
 ```bash
 python start_insurance_mcp.py
+
 ```
 
 Keep this process running.
@@ -574,31 +609,33 @@ For Streamlit:
 
 ```bash
 streamlit run streamlit_app.py
+
 ```
 
 Or for the CLI:
 
 ```bash
 python insurance_multi_agent_client.py
+
 ```
 
 ---
 
 # 13. Component Directory & File Responsibilities
 
-| Component / File                                    | Responsibility                                                            |
-| --------------------------------------------------- | ------------------------------------------------------------------------- |
-| `Health Insurance Fraud Claims.xlsx`                | Raw historical claims dataset                                             |
-| `train_fraud_model.py`                              | Feature engineering, XGBoost/LightGBM training, SHAP explainer creation   |
+| Component / File | Responsibility |
+| --- | --- |
+| `Health Insurance Fraud Claims.xlsx` | Raw historical claims dataset |
+| `train_fraud_model.py` | Feature engineering, XGBoost/LightGBM training, SHAP explainer creation |
 | `insurance_multi_agent_chunking_indexing_copy_2.py` | LangGraph multi-agent backend, Weaviate hybrid search, Qwen LLM synthesis |
-| `insurance_risk_server.py`                          | FastMCP server for the `score_claim` tool                                 |
-| `insurance_policy_server.py`                        | FastMCP server for the `lookup_policy` tool                               |
-| `start_insurance_mcp.py`                            | Orchestrator, free-port finder, and MCP health-check launcher             |
-| `insurance_multi_agent_client.py`                   | Async CLI client with NLP slot extraction and auto-routing                |
-| `streamlit_app.py`                                  | Web dashboard with real-time MCP tool tracking and parameter refinement   |
-| `generate_rag_pdf.py`                               | Utility to generate standard policy PDFs for RAG indexing                 |
-| `output/fraud_detection_model.pkl`                  | Trained ML pipeline artifact required at runtime                          |
-| `output/processed_claim_features.csv`               | Processed feature dataset generated during model training                 |
+| `insurance_risk_server.py` | FastMCP server for the `score_claim` tool |
+| `insurance_policy_server.py` | FastMCP server for the `lookup_policy` tool |
+| `start_insurance_mcp.py` | Orchestrator, free-port finder, and MCP health-check launcher |
+| `insurance_multi_agent_client.py` | Async CLI client with NLP slot extraction and auto-routing |
+| `streamlit_app.py` | Web dashboard with real-time MCP tool tracking and parameter refinement |
+| `generate_rag_pdf.py` | Utility to generate standard policy PDFs for RAG indexing |
+| `output/fraud_detection_model.pkl` | Trained ML pipeline artifact required at runtime |
+| `output/processed_claim_features.csv` | Processed feature dataset generated during model training |
 
 ---
 
@@ -610,18 +647,20 @@ Run:
 
 ```bash
 python train_fraud_model.py
+
 ```
 
 This generates the required model artifacts.
 
 ---
 
-## `Failed to connect to http://127.0.0.1:8011/mcp`
+## `Failed to connect to [http://127.0.0.1:8011/mcp](http://127.0.0.1:8011/mcp)`
 
 Make sure the MCP services are running:
 
 ```bash
 python start_insurance_mcp.py
+
 ```
 
 Keep the MCP launcher running in a separate terminal.
@@ -662,4 +701,5 @@ Cross-Encoder
 Streamlit
 FastMCP
 Docker
+
 ```
