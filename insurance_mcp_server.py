@@ -46,12 +46,12 @@ class PolicyRequest(ClaimInput):
 
 
 def _get_system():
-    """Initializes the ML and LLM pipeline EXACTLY ONCE to prevent tensor/memory collisions."""
     global _SYSTEM
     if _SYSTEM is None:
         from insurance_multi_agent_chunking_indexing import InsuranceAgentSystem
         logger.info("Initializing Unified Pipeline (Risk ML + Policy LLM)")
-        _SYSTEM = InsuranceAgentSystem(use_local_llm=True)
+        # Set use_local_llm=False to stop Hugging Face weights from loading into Python memory
+        _SYSTEM = InsuranceAgentSystem(use_local_llm=False)
     return _SYSTEM
 
 
@@ -135,21 +135,50 @@ def lookup_policy(request: PolicyRequest) -> Dict[str, Any]:
 @mcp.tool()
 def score_claim(claim: ClaimInput) -> Dict[str, Any]:
     """Calculate fraud risk, model-based probability, and triage decisions."""
-    system = _get_system() # Uses the same Singleton
+    system = _get_system() 
     
     raw_claim = claim.model_dump()
     mapped_claim = {
-        "ClaimType": raw_claim.pop("claim_type"), "ClaimAmount": raw_claim.pop("claim_amount"),
-        "ProcedureCode": raw_claim.pop("procedure_code"), "ProviderSpecialty": raw_claim.pop("provider_specialty"),
-        "PatientAge": raw_claim.pop("patient_age"), "PatientIncome": raw_claim.pop("patient_income"),
-        "PatientID": raw_claim.pop("patient_id"), "ProviderID": raw_claim.pop("provider_id"),
-        "ClaimStatus": raw_claim.pop("claim_status"), "DiagnosisCode": raw_claim.pop("diagnosis_code"),
-        "ProviderLocation": raw_claim.pop("provider_location"), "ClaimSubmissionMethod": raw_claim.pop("claim_submission_method")
+        "ClaimType": raw_claim.pop("claim_type"), 
+        "ClaimAmount": raw_claim.pop("claim_amount"),
+        "ProcedureCode": raw_claim.pop("procedure_code"), 
+        "ProviderSpecialty": raw_claim.pop("provider_specialty"),
+        "PatientAge": raw_claim.pop("patient_age"), 
+        "PatientIncome": raw_claim.pop("patient_income"),
+        "PatientID": raw_claim.pop("patient_id"), 
+        "ProviderID": raw_claim.pop("provider_id"),
+        "ClaimStatus": raw_claim.pop("claim_status"), 
+        "DiagnosisCode": raw_claim.pop("diagnosis_code"),
+        "ProviderLocation": raw_claim.pop("provider_location"), 
+        "ClaimSubmissionMethod": raw_claim.pop("claim_submission_method")
+    }
+
+    state = {
+        "raw_claim": mapped_claim,
+        "user_query": f"Risk triage for {claim.claim_id}",
+        "target_route": "claims_triage_agent",
+        "dispersion_metrics": {}, 
+        "ml_probability": 0.0, 
+        "ml_prediction": 0,
+        "triage_status": "", 
+        "risk_explanation": "", 
+        "retrieved_docs": [],
+        "rag_generated_answer": "", 
+        "needs_clarification": False, 
+        "final_report": ""
     }
 
     with _ML_LOCK:
         try:
-            state = system.process_claim(raw_claim=mapped_claim, user_query=f"Risk triage for {claim.claim_id}")
+            # 1. Execute Agent 1: ML Triage Math
+            triage_res = system.claims_triage_agent(state)
+            state.update(triage_res)
+            
+            # 2. Execute Agent 2: SHAP Feature Importance
+            shap_res = system.risk_analysis_agent(state)
+            state.update(shap_res)
+            
+            # Return pure ML results without invoking policy_agent (RAG)
             return {
                 "claim_id": claim.claim_id,
                 "risk_level": "HIGH_RISK" if state.get("ml_prediction", 0) else "LOW_RISK",
@@ -157,7 +186,6 @@ def score_claim(claim: ClaimInput) -> Dict[str, Any]:
                 "decision_cutoff": round(system.optimal_threshold, 6),
                 "triage_status": state.get("triage_status", ""),
                 "risk_explanation": state.get("risk_explanation", ""),
-                #"final_report": state.get("final_report", ""),
             }
         except Exception as e:
             logger.error(f"Risk Engine Error: {e}")
