@@ -322,7 +322,7 @@ class InsuranceAgentSystem:
                     feature_impacts = sorted(list(zip(self.feature_names, sv)), key=lambda x: abs(x[1]), reverse=True)
                     
                     explanation = "Key Model Feature Impact (SHAP Analysis):\n"
-                    for feat, impact in feature_impacts[:3]:
+                    for feat, impact in feature_impacts[:5]:
                         direction = "pushed RISK UP" if impact > 0 else "pulled RISK DOWN"
                         explanation += f"  - {feat}: {direction} by {abs(impact):.3f}\n"
                 else:
