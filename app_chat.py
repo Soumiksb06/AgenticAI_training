@@ -183,7 +183,7 @@ SYSTEM_PROMPT = """You are ClaimsAI, an enterprise health insurance & policy int
 
 ### 3. OUTPUT & CITATION FORMATTING
 - **Synthesize Both Tools**: If both tools were called, present the output in two clear sections: **🛡️ Fraud Risk Triage** and **📜 Policy Coverage & Limits**.
-- **Citations**: Include brief document citations for policy lookups (e.g., `📁 Source: [Document / Clause Name]`).
+- **Citations**: Include brief document citations for policy lookups (e.g., `📁 Source: [Document / Clause Name]`, top 3 sources.).
 - **No Unsolicited Offers**: NEVER append follow-up questions or offers (e.g., "Would you like me to...")."""
 
 WELCOME_MESSAGE = """### 👋 Welcome to ClaimsAI Intelligence
