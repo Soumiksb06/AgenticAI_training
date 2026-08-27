@@ -157,7 +157,7 @@ def score_claim(claim: ClaimInput) -> Dict[str, Any]:
                 "decision_cutoff": round(system.optimal_threshold, 6),
                 "triage_status": state.get("triage_status", ""),
                 "risk_explanation": state.get("risk_explanation", ""),
-                "final_report": state.get("final_report", ""),
+                #"final_report": state.get("final_report", ""),
             }
         except Exception as e:
             logger.error(f"Risk Engine Error: {e}")
