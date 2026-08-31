@@ -1,6 +1,25 @@
+"""ClaimsAI Streamlit UI with true orchestrator -> specialist agents -> MCP tools.
+
+Architecture
+------------
+User/UI
+   -> Orchestrator Agent
+      -> Risk Specialist Agent -> score_claim MCP tool
+      -> Policy Specialist Agent -> lookup_policy MCP tool
+   -> Orchestrator synthesis
+   -> User
+
+The orchestrator never calls the domain MCP tools directly.
+Each specialist receives only the MCP capability relevant to its role.
+"""
+
+from __future__ import annotations
+
 import asyncio
+import json
 import os
-from typing import Annotated, Any, Dict, TypedDict
+import re
+from typing import Any, Dict, Literal, Optional
 
 import streamlit as st
 from fastmcp import Client
@@ -8,15 +27,15 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
-from pydantic import create_model
+from pydantic import BaseModel, Field
 
-# =====================================================================
-# CONFIGURATION & FAST-MCP SETUP
-# =====================================================================
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 MCP_SERVER_PORT = os.getenv("MCP_PORT", "8011")
-MCP_SERVER_URL = f"http://127.0.0.1:{MCP_SERVER_PORT}/mcp"
+MCP_SERVER_URL = os.getenv(
+    "MCP_SERVER_URL", f"http://127.0.0.1:{MCP_SERVER_PORT}/mcp"
+)
 
 st.set_page_config(
     page_title="ClaimsAI Platform",
@@ -25,300 +44,477 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# =====================================================================
-# MODERN CUSTOM CSS (CENTERED TYPOGRAPHY & CLEAN CARDS)
-# =====================================================================
 st.markdown(
     """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Plus Jakarta Sans', sans-serif;
-    }
-    
-    .hero-container {
-        text-align: center;
-        padding: 1rem 1rem 0.5rem 1rem;
-        margin-bottom: 1rem;
-    }
-    
-    .main-title {
-        font-size: 2.4rem;
-        font-weight: 800;
-        background: linear-gradient(135deg, #1E3C72 0%, #2A5298 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.2rem;
-    }
-    
-    .sub-title {
-        color: #555E6C;
-        font-size: 1rem;
-        font-weight: 600;
-        margin-bottom: 1rem;
-    }
-    
-    .badge-container {
-        display: flex;
-        justify-content: center;
-        gap: 10px;
-        margin-bottom: 0.8rem;
-    }
-    
-    .badge {
-        background-color: #EBF3FE;
-        color: #1E3C72;
-        padding: 5px 12px;
-        border-radius: 20px;
-        font-size: 0.8rem;
-        font-weight: 700;
-        border: 1px solid #C6DCFA;
-    }
+    .hero-container { text-align:center; padding:1rem 1rem .5rem; margin-bottom:1rem; }
+    .main-title { font-size:2.35rem; font-weight:800; margin-bottom:.2rem; }
+    .sub-title { color:#555E6C; font-size:1rem; font-weight:600; margin-bottom:1rem; }
+    .badge-container { display:flex; justify-content:center; gap:10px; margin-bottom:.8rem; }
+    .badge { background:#EBF3FE; color:#1E3C72; padding:5px 12px; border-radius:20px;
+             font-size:.8rem; font-weight:700; border:1px solid #C6DCFA; }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# =====================================================================
-# DYNAMIC MCP TOOL DISCOVERY
-# =====================================================================
-async def _call_mcp(tool_name: str, payload: Dict[str, Any]) -> str:
+
+# ---------------------------------------------------------------------------
+# MCP transport helpers
+# ---------------------------------------------------------------------------
+async def _call_mcp(tool_name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Call one MCP tool and normalize FastMCP content into a Python dict."""
     try:
         async with Client(MCP_SERVER_URL) as client:
-            res = await client.call_tool(tool_name, payload)
-            if hasattr(res, "content") and res.content:
-                for item in res.content:
-                    if hasattr(item, "text"):
-                        return item.text
-            return str(res)
+            result = await client.call_tool(tool_name, payload)
+            if hasattr(result, "content"):
+                text_parts = []
+                for item in result.content or []:
+                    text = getattr(item, "text", None)
+                    if text is not None:
+                        text_parts.append(text)
+                if text_parts:
+                    raw = "\n".join(text_parts)
+                    try:
+                        return json.loads(raw)
+                    except json.JSONDecodeError:
+                        return {"result": raw}
+            if isinstance(result, dict):
+                return result
+            return {"result": str(result)}
     except Exception as exc:
-        return f"Error executing {tool_name}: {str(exc)}"
+        return {"error": f"MCP {tool_name} call failed: {exc}"}
 
-def build_pydantic_schema(tool_name: str, input_schema: dict):
-    fields = {}
-    props = input_schema.get("properties", {})
-    required = input_schema.get("required", [])
-    type_map = {"string": str, "number": float, "integer": int, "boolean": bool}
-    
-    for field_name, field_info in props.items():
-        field_type = type_map.get(field_info.get("type"), Any)
-        default_val = ... if field_name in required else field_info.get("default", None)
-        fields[field_name] = (field_type, default_val)
-        
-    return create_model(f"{tool_name}_input", **fields)
 
-def load_dynamic_mcp_tools() -> list:
-    tools_list = []
-    
-    async def fetch_tools():
-        async with Client(MCP_SERVER_URL) as client:
-            return await client.list_tools()
-            
+async def _discover_mcp_tools() -> Dict[str, Any]:
     try:
-        mcp_tools = asyncio.run(fetch_tools())
-        for mcp_tool in mcp_tools:
-            name = mcp_tool.name
-            desc = mcp_tool.description
-            schema_dict = getattr(mcp_tool, "inputSchema", {}) or getattr(mcp_tool, "parameters", {})
-            args_schema = build_pydantic_schema(name, schema_dict)
+        async with Client(MCP_SERVER_URL) as client:
+            tools = await client.list_tools()
+            return {t.name: t for t in tools}
+    except Exception as exc:
+        return {"__error__": exc}
 
-            def make_runner(tool_name):
-                def runner(**kwargs):
-                    return asyncio.run(_call_mcp(tool_name, kwargs))
-                return runner
 
-            tools_list.append(
-                StructuredTool.from_function(
-                    func=make_runner(name),
-                    name=name,
-                    description=desc,
-                    args_schema=args_schema
+@st.cache_resource(show_spinner=False)
+def get_mcp_tool_catalog() -> Dict[str, Any]:
+    try:
+        return asyncio.run(_discover_mcp_tools())
+    except Exception as exc:
+        return {"__error__": exc}
+
+
+# ---------------------------------------------------------------------------
+# MCP-backed specialist tools
+# ---------------------------------------------------------------------------
+class RiskToolInput(BaseModel):
+    claim_amount: float = Field(..., description="Claim amount in the claim currency")
+    patient_income: float = Field(35000.0)
+    patient_age: int = Field(45)
+    claim_type: str = Field("Outpatient")
+    claim_id: str = Field("CLM-AUTO")
+    procedure_code: str = Field("AA395")
+    patient_id: str = Field("P-DEFAULT")
+    provider_id: str = Field("PRV-201")
+    provider_specialty: str = Field("General Practice")
+    diagnosis_code: str = Field("D001")
+    provider_location: str = Field("Urban")
+    claim_status: str = Field("Submitted")
+    claim_submission_method: str = Field("Electronic")
+    previously_rejected_claims: float = Field(0.0)
+    num_claims_last_12m: float = Field(1.0)
+
+
+class PolicyToolInput(BaseModel):
+    question: str = Field(...)
+    claim_type: str = Field("Outpatient")
+    procedure_code: str = Field("AA395")
+
+
+async def _risk_mcp_tool(**kwargs: Any) -> str:
+    result = await _call_mcp("score_claim", kwargs)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+async def _policy_mcp_tool(**kwargs: Any) -> str:
+    result = await _call_mcp("lookup_policy", kwargs)
+    return json.dumps(result, ensure_ascii=False, indent=2)
+
+
+risk_mcp_tool = StructuredTool.from_function(
+    coroutine=_risk_mcp_tool,
+    name="score_claim",
+    description=(
+        "Call the insurance risk MCP tool to calculate fraud probability, "
+        "risk level, triage status and SHAP explanation for a claim."
+    ),
+    args_schema=RiskToolInput,
+)
+
+policy_mcp_tool = StructuredTool.from_function(
+    coroutine=_policy_mcp_tool,
+    name="lookup_policy",
+    description=(
+        "Call the insurance policy MCP tool to retrieve grounded coverage, limits, "
+        "rules and SOP information from the policy knowledge base."
+    ),
+    args_schema=PolicyToolInput,
+)
+
+
+# ---------------------------------------------------------------------------
+# LLM helpers
+# ---------------------------------------------------------------------------
+def build_llm(api_key: str, api_base: str, model_name: str):
+    return ChatOpenAI(
+        api_key=api_key,
+        base_url=api_base,
+        model=model_name,
+        temperature=0.1,
+    )
+
+
+async def run_tool_call_loop(
+    llm,
+    system_prompt: str,
+    user_prompt: str,
+    tool: StructuredTool,
+    max_rounds: int = 3,
+) -> Dict[str, Any]:
+    """Run a specialist that has exactly one MCP-backed tool."""
+    tool_llm = llm.bind_tools([tool])
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=user_prompt),
+    ]
+    tool_result = None
+
+    for _ in range(max_rounds):
+        ai_msg: AIMessage = await tool_llm.ainvoke(messages)
+        messages.append(ai_msg)
+
+        if not ai_msg.tool_calls:
+            return {
+                "answer": ai_msg.content or "No specialist response was produced.",
+                "tool_result": tool_result or {},
+            }
+
+        for call in ai_msg.tool_calls:
+            call_name = call["name"]
+            args = call.get("args", {}) or {}
+            if call_name != tool.name:
+                continue
+
+            result_text = await tool.ainvoke(args)
+            try:
+                tool_result = json.loads(result_text)
+            except Exception:
+                tool_result = {"result": result_text}
+            messages.append(
+                ToolMessage(
+                    content=result_text,
+                    tool_call_id=call["id"],
+                    name=call_name,
                 )
             )
-    except Exception as e:
-        st.sidebar.error(f"⚠️ Dynamic tool discovery failed: {e}")
-        
-    return tools_list
 
-tools = load_dynamic_mcp_tools()
-tool_node = ToolNode(tools)
+    return {
+        "answer": "Specialist tool loop reached its execution limit.",
+        "tool_result": tool_result or {},
+    }
 
-# =====================================================================
-# LANGGRAPH ENGINE
-# =====================================================================
-class AgentState(TypedDict):
-    messages: Annotated[list, add_messages]
 
-def create_agent_graph(llm):
-    llm_with_tools = llm.bind_tools(tools)
-    def call_model(state: AgentState):
-        return {"messages": [llm_with_tools.invoke(state["messages"])]}
-    def should_continue(state: AgentState) -> str:
-        return "tools" if state["messages"][-1].tool_calls else END
-
-    workflow = StateGraph(AgentState)
-    workflow.add_node("agent", call_model)
-    workflow.add_node("tools", tool_node)
-    workflow.set_entry_point("agent")
-    workflow.add_conditional_edges("agent", should_continue, ["tools", END])
-    workflow.add_edge("tools", "agent")
-    return workflow.compile()
-
-# =====================================================================
-# SYSTEM PROMPT
-# =====================================================================
-SYSTEM_PROMPT = """You are ClaimsAI, an enterprise health insurance & policy intelligence assistant.
-
-### 1. DUAL INTENT ROUTING MANDATES
-- **Dual-Intent Queries**: If a query asks about policy limits/coverage AND fraud risk/escalation, YOU MUST INVOKE BOTH TOOLS:
-  1. `score_claim` to assess fraud risk and triage status.
-  2. `lookup_policy` to retrieve policy coverage limits and SOP guidelines.
-- **Single Policy Queries**: Call `lookup_policy` for policy coverage rules, limits, or SOPs.
-- **Single Triage Queries**: Call `score_claim` when numerical claim amounts are provided for risk scoring.
-- **General Chat**: Respond directly without tools ONLY for greetings ("hi") or identity queries ("who are you").
-
-### 2. STRICT SCOPE GUARDRAIL
-- Decline non-health-insurance queries in one sentence: "I am specialized exclusively in health insurance policy guidance and claim risk triage."
-
-### 3. OUTPUT & CITATION FORMATTING
-- **Synthesize Both Tools**: If both tools were called, present the output in two clear sections: **🛡️ Fraud Risk Triage** and **📜 Policy Coverage & Limits**.
-- **Citations**: Include brief document citations for policy lookups (e.g., `📁 Source: [Document / Clause Name]`, top 3 sources.).
-- **No Unsolicited Offers**: NEVER append follow-up questions or offers (e.g., "Would you like me to...")."""
-
-WELCOME_MESSAGE = """### 👋 Welcome to ClaimsAI Intelligence
-Your multi-agent platform for health insurance risk scoring and policy verification.
-
-* 🛡️ **Fraud Risk Scoring:** Input claim amounts and patient financial details for ML triage and SHAP explanations.
-* 📜 **Policy Guidance:** Query policy rules, coverage limits, and operational SOPs.
-* 💬 **Direct Support:** Ask general health insurance questions anytime.
+RISK_SPECIALIST_PROMPT = """You are the Risk Specialist Agent for a health-insurance investigation system.
+Your sole external capability is the `score_claim` MCP tool.
+Rules:
+1. When the user task requires claim-risk assessment, ALWAYS call `score_claim`.
+2. Extract every claim field that can be supported by the user input; use tool defaults only when not supplied.
+3. Never invent model scores or SHAP findings. Treat the MCP response as authoritative.
+4. After the tool returns, summarize risk level, score, cutoff, triage status, and the most important SHAP drivers.
+5. Do not answer policy-coverage questions; the Policy Specialist handles them.
+6. Return concise structured text for the orchestrator.
 """
 
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        SystemMessage(content=SYSTEM_PROMPT),
-        AIMessage(content=WELCOME_MESSAGE)
+POLICY_SPECIALIST_PROMPT = """You are the Policy Specialist Agent for a health-insurance investigation system.
+Your sole external capability is the `lookup_policy` MCP tool.
+Rules:
+1. When the task requires policy coverage, limits, exclusions or SOP guidance, ALWAYS call `lookup_policy`.
+2. Form a focused retrieval question using the user request and any claim/procedure context.
+3. Never invent a policy rule. Only use information returned by the MCP tool.
+4. Preserve source document names and important evidence from retrieved_docs.
+5. Return a grounded policy conclusion for the orchestrator.
+"""
+
+ORCHESTRATOR_ROUTER_PROMPT = """You are the Orchestrator Agent of ClaimsAI.
+You do NOT call MCP tools directly.
+Your job is to decide which specialist agents are required.
+
+Choose exactly one route:
+- DIRECT: greetings, identity, or simple health-insurance conversation that needs no specialist.
+- RISK: numerical claim fraud/risk/triage request.
+- POLICY: policy coverage/limit/exclusion/SOP request.
+- BOTH: the request needs both claim risk analysis and policy analysis.
+
+Return ONLY JSON in this exact shape:
+{"route":"DIRECT|RISK|POLICY|BOTH","reason":"brief reason"}
+
+Routing rules:
+- If a numerical claim is provided and the user asks whether it is suspicious/fraudulent/risky -> RISK.
+- If the user asks about policy coverage or limits without risk -> POLICY.
+- If both risk and coverage/limits are requested -> BOTH.
+- A claim amount alone implies RISK when the user asks to assess/evaluate/investigate it.
+- Never call score_claim or lookup_policy yourself.
+"""
+
+SYNTHESIS_PROMPT = """You are the final Orchestrator Agent for ClaimsAI.
+Synthesize specialist results into one accurate response to the user.
+
+Rules:
+- Do not invent facts.
+- Clearly separate fraud-risk findings from policy findings when both exist.
+- For policy content, cite source_file names returned by the Policy Specialist.
+- For risk content, preserve the MCP risk score, risk level and key SHAP drivers.
+- State when evidence is unavailable or a specialist encountered an error.
+- Do not expose internal agent/tool routing details unless useful for transparency.
+- Do not ask follow-up questions unless the user explicitly asks for an interactive workflow.
+"""
+
+
+# ---------------------------------------------------------------------------
+# LangGraph orchestrator
+# ---------------------------------------------------------------------------
+class OrchestratorState(dict):
+    pass
+
+
+def parse_route(text: str) -> Dict[str, str]:
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            obj = json.loads(match.group(0))
+            route = str(obj.get("route", "DIRECT")).upper()
+            reason = str(obj.get("reason", ""))
+            if route in {"DIRECT", "RISK", "POLICY", "BOTH"}:
+                return {"route": route, "reason": reason}
+        except json.JSONDecodeError:
+            pass
+
+    upper = text.upper()
+    if "BOTH" in upper:
+        return {"route": "BOTH", "reason": "Detected risk and policy intents."}
+    if "RISK" in upper:
+        return {"route": "RISK", "reason": "Detected risk intent."}
+    if "POLICY" in upper:
+        return {"route": "POLICY", "reason": "Detected policy intent."}
+    return {"route": "DIRECT", "reason": "No specialist route detected."}
+
+
+async def route_query(llm, user_query: str) -> Dict[str, str]:
+    response = await llm.ainvoke(
+        [
+            SystemMessage(content=ORCHESTRATOR_ROUTER_PROMPT),
+            HumanMessage(content=user_query),
+        ]
+    )
+    return parse_route(str(response.content))
+
+
+async def run_risk_specialist(llm, user_query: str) -> Dict[str, Any]:
+    return await run_tool_call_loop(
+        llm,
+        RISK_SPECIALIST_PROMPT,
+        user_query,
+        risk_mcp_tool,
+    )
+
+
+async def run_policy_specialist(llm, user_query: str) -> Dict[str, Any]:
+    return await run_tool_call_loop(
+        llm,
+        POLICY_SPECIALIST_PROMPT,
+        user_query,
+        policy_mcp_tool,
+    )
+
+
+async def execute_request(llm, user_query: str) -> Dict[str, Any]:
+    route = await route_query(llm, user_query)
+
+    if route["route"] == "DIRECT":
+        response = await llm.ainvoke(
+            [
+                SystemMessage(
+                    content=(
+                        "You are ClaimsAI, a health-insurance assistant. "
+                        "Answer the user's conversational request directly and stay in scope."
+                    )
+                ),
+                HumanMessage(content=user_query),
+            ]
+        )
+        return {"route": route, "final_answer": str(response.content), "risk": None, "policy": None}
+
+    risk_result = None
+    policy_result = None
+
+    if route["route"] == "RISK":
+        risk_result = await run_risk_specialist(llm, user_query)
+    elif route["route"] == "POLICY":
+        policy_result = await run_policy_specialist(llm, user_query)
+    else:
+        risk_result, policy_result = await asyncio.gather(
+            run_risk_specialist(llm, user_query),
+            run_policy_specialist(llm, user_query),
+        )
+
+    synthesis_payload = {
+        "user_query": user_query,
+        "route": route,
+        "risk_specialist": risk_result,
+        "policy_specialist": policy_result,
+    }
+
+    final = await llm.ainvoke(
+        [
+            SystemMessage(content=SYNTHESIS_PROMPT),
+            HumanMessage(
+                content=(
+                    "Specialist results are below. Synthesize the final answer.\n\n"
+                    + json.dumps(synthesis_payload, ensure_ascii=False, indent=2, default=str)
+                )
+            ),
+        ]
+    )
+
+    return {
+        "route": route,
+        "final_answer": str(final.content),
+        "risk": risk_result,
+        "policy": policy_result,
+    }
+
+
+def create_orchestrator_graph(llm):
+    """Wrap the orchestrator execution in LangGraph for explicit orchestration state."""
+
+    async def orchestrator_node(state: Dict[str, Any]):
+        result = await execute_request(llm, state["user_query"])
+        return {"result": result}
+
+    workflow = StateGraph(dict)
+    workflow.add_node("orchestrator", orchestrator_node)
+    workflow.set_entry_point("orchestrator")
+    workflow.add_edge("orchestrator", END)
+    return workflow.compile()
+
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
+WELCOME_MESSAGE = """### 👋 Welcome to ClaimsAI Intelligence
+A multi-agent health-insurance platform for claim-risk triage and policy verification.
+
+**Architecture:** Orchestrator Agent → Specialist Agent(s) → MCP Tool(s) → Final Orchestrator response.
+"""
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = [
+        {"role": "assistant", "content": WELCOME_MESSAGE}
     ]
 
-# =====================================================================
-# SIDEBAR
-# =====================================================================
 with st.sidebar:
     st.header("⚙️ Agent Configuration")
-    provider = st.selectbox("🧠 AI Provider", ["Tiger Analytics AI Gateway", "Local (Ollama)"])
+    provider = st.selectbox(
+        "🧠 AI Provider",
+        ["Tiger Analytics AI Gateway", "Local (Ollama)"],
+    )
     if provider == "Tiger Analytics AI Gateway":
-        default_key, default_base, default_model = "sk-samplekey123", "https://api.ai-gateway.tigeranalytics.com", "gpt-5-nano"
+        default_key = os.getenv("AI_GATEWAY_API_KEY", "")
+        default_base = os.getenv(
+            "AI_GATEWAY_BASE_URL", "https://api.ai-gateway.tigeranalytics.com"
+        )
+        default_model = os.getenv("AI_GATEWAY_MODEL", "gpt-5-nano")
     else:
-        default_key, default_base, default_model = "ollama", "http://localhost:11434/v1", "qwen2.5:1.5b"
+        default_key = "ollama"
+        default_base = "http://localhost:11434/v1"
+        default_model = "qwen2.5:1.5b"
 
     api_key = st.text_input("API Key", type="password", value=default_key)
     api_base = st.text_input("API Base URL", value=default_base)
     model_name = st.text_input("Model Name", value=default_model)
+
     st.markdown("---")
-    st.caption(f"🛠️ Auto-Discovered Tools: `{len(tools)} loaded`")
-    
+    catalog = get_mcp_tool_catalog()
+    if "__error__" in catalog:
+        st.error(f"⚠️ MCP discovery failed: {catalog['__error__']}")
+    else:
+        available = [name for name in catalog.keys() if not name.startswith("__")]
+        st.caption(f"🛠️ MCP tools discovered: {len(available)}")
+        if available:
+            st.code("\n".join(available))
+
     if st.button("🗑️ Clear Chat History"):
-        st.session_state.messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            AIMessage(content=WELCOME_MESSAGE)
+        st.session_state.chat_history = [
+            {"role": "assistant", "content": WELCOME_MESSAGE}
         ]
         st.rerun()
 
-# =====================================================================
-# CENTER-ORIENTED HEADER
-# =====================================================================
 st.markdown(
     """
     <div class="hero-container">
         <div class="main-title">🤖 ClaimsAI Multi-Agent Platform</div>
-        <div class="sub-title">Automated Risk Triage & Policy Intelligence</div>
+        <div class="sub-title">Orchestrator → Specialist Agents → FastMCP Tools</div>
         <div class="badge-container">
-            <span class="badge">FastMCP Auto-Discovery</span>
-            <span class="badge">SHAP Explainability</span>
-            <span class="badge">RAG Vector Engine</span>
+            <span class="badge">🧠 Orchestrator Agent</span>
+            <span class="badge">🛡️ Risk Specialist</span>
+            <span class="badge">📜 Policy Specialist</span>
+            <span class="badge">⚡ FastMCP</span>
         </div>
     </div>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
-# Render Chat History
-for msg in st.session_state.messages:
-    if isinstance(msg, SystemMessage):
-        continue
-    elif isinstance(msg, HumanMessage):
-        st.chat_message("user", avatar="🧑‍💻").markdown(msg.content)
-    elif isinstance(msg, AIMessage):
-        if msg.content:
-            st.chat_message("assistant", avatar="🤖").markdown(msg.content)
-    elif isinstance(msg, ToolMessage):
-        with st.expander(f"⚙️ FastMCP Tool Execution Trace: `{msg.name}`"):
-            st.code(msg.content, language="json")
+for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"], avatar="🤖" if msg["role"] == "assistant" else "🧑‍💻"):
+        st.markdown(msg["content"])
+        if msg.get("trace"):
+            with st.expander("⚙️ Agent / MCP execution trace"):
+                st.json(msg["trace"])
 
-# =====================================================================
-# SYNCHRONIZED REAL-TIME CHAT EXECUTION LOOP
-# =====================================================================
-if user_input := st.chat_input("Ask about a policy or score a claim..."):
-    st.session_state.messages.append(HumanMessage(content=user_input))
+if user_input := st.chat_input("Ask about a policy or investigate a claim..."):
+    st.session_state.chat_history.append({"role": "user", "content": user_input})
     st.chat_message("user", avatar="🧑‍💻").markdown(user_input)
 
     with st.chat_message("assistant", avatar="🤖"):
-        status_container = st.container()
-        text_placeholder = st.empty()
-        
         try:
-            llm = ChatOpenAI(api_key=api_key, base_url=api_base, model=model_name, temperature=0.1)
-            app = create_agent_graph(llm)
+            llm = build_llm(api_key, api_base, model_name)
+            graph = create_orchestrator_graph(llm)
 
-            final_content = ""
-            executed_tools = []
+            with st.status("🧠 Orchestrator analyzing intent...", expanded=True) as status:
+                result_state = asyncio.run(
+                    graph.ainvoke({"user_query": user_input, "result": None})
+                )
+                result = result_state["result"]
+                route = result["route"]["route"]
+                status.write(f"🧭 Route selected: **{route}**")
 
-            # Immediate UI feedback upon submitting query
-            with status_container.status("🧠 **Analyzing intent & routing query...**", expanded=True) as status_box:
-                for event in app.stream({"messages": st.session_state.messages}, stream_mode="values"):
-                    last_msg = event["messages"][-1]
-                    
-                    # 1. Tool Call Triggered
-                    if isinstance(last_msg, AIMessage) and last_msg.tool_calls:
-                        for tc in last_msg.tool_calls:
-                            t_name = tc["name"]
-                            if t_name not in executed_tools:
-                                executed_tools.append(t_name)
-                                status_box.write(f"⚙️ Executing `{t_name}` on FastMCP backend...")
-                        
-                        status_box.update(
-                            label=f"⚡ **Running Agent Tools: `{', '.join(executed_tools)}`...**", 
-                            state="running", 
-                            expanded=True
-                        )
+                if result.get("risk") is not None:
+                    status.write("🛡️ Risk Specialist → `score_claim` MCP")
+                if result.get("policy") is not None:
+                    status.write("📜 Policy Specialist → `lookup_policy` MCP")
+                status.update(label="✅ Multi-agent execution complete", state="complete", expanded=False)
 
-                    # 2. Tool Execution Finished -> Transitioning to Synthesis
-                    elif isinstance(last_msg, ToolMessage):
-                        status_box.write(f"✅ FastMCP `{last_msg.name}` step complete. Synthesizing final response...")
-                        status_box.update(
-                            label=f"🧠 **Synthesizing multi-agent analysis...**", 
-                            state="running", 
-                            expanded=True
-                        )
-
-                    # 3. Final Content Received
-                    elif isinstance(last_msg, AIMessage) and last_msg.content:
-                        final_content = last_msg.content
-                        text_placeholder.markdown(final_content)
-
-                # Close status box ONLY AFTER the entire streaming loop finishes and text is rendered
-                if executed_tools:
-                    status_box.update(
-                        label=f"✅ **Execution Complete ({len(executed_tools)} tool{'s' if len(executed_tools)>1 else ''} used)**", 
-                        state="complete", 
-                        expanded=False
-                    )
-                else:
-                    # Clear status box for pure chat queries
-                    status_container.empty()
-
-            st.session_state.messages = event["messages"]
-            
-        except Exception as e:
-            status_container.empty()
-            text_placeholder.error(f"Error processing request: {str(e)}")
+            st.markdown(result["final_answer"])
+            st.session_state.chat_history.append(
+                {
+                    "role": "assistant",
+                    "content": result["final_answer"],
+                    "trace": {
+                        "route": result["route"],
+                        "risk_specialist": result.get("risk"),
+                        "policy_specialist": result.get("policy"),
+                    },
+                }
+            )
+        except Exception as exc:
+            st.error(f"Error processing request: {exc}")

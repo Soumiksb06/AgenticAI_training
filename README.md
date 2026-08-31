@@ -1,393 +1,734 @@
 # Multi-Agent Insurance MCP Architecture
 
-An end-to-end **Insurance Claims Risk & Investigation Assistant** that combines fraud-detection ML, SHAP explainability, policy RAG, LangGraph orchestration, FastMCP services, and a Streamlit interface.
+An end-to-end **Insurance Claims Risk & Investigation Assistant** that combines:
+
+* Multi-agent orchestration with **LangGraph**
+* Specialized **Risk** and **Policy** agents
+* **FastMCP** capability services
+* ML-based fraud detection
+* **SHAP** explainability
+* Hybrid **RAG** with Weaviate
+* Cross-encoder reranking
+* Local **Qwen** grounded generation
+* Streamlit-based chat interface
+
+The system follows a clear architectural separation:
+
+> **Orchestrator Agent decides → Specialist Agent solves → MCP Tool invokes → Backend Capability executes → Specialist interprets → Orchestrator synthesizes**
 
 ---
 
-## Architecture
+# 1. Architecture
 
 ```mermaid
 flowchart LR
 
-    %% =========================
-    %% USER & CLIENT
-    %% =========================
+    USER["👤 User"]
+    UI["🖥️ Streamlit<br/>app_chat.py"]
 
-    USER(("👤 User"))
+    ORCH["🧠 Orchestrator Agent<br/><br/>Understands intent<br/>Routes work<br/>Coordinates agents<br/>Synthesizes answer"]
 
-    subgraph CLIENT["🖥️ Client & Interaction Layer"]
-        direction TB
-        UI["🌐 Streamlit Dashboard"]
-        CLI["⌨️ Async CLI Client"]
-        NLP["🧠 NLP Slot Extraction"]
-        FORM["📝 Slot Filling"]
-        ROUTER{"🔀 Claim Router"}
-    end
+    RISK["🛡️ Risk Specialist Agent<br/><br/>Handles fraud-risk tasks"]
+    POLICY["📚 Policy Specialist Agent<br/><br/>Handles coverage/policy tasks"]
+
+    RMCP["Risk MCP<br/><b>score_claim</b>"]
+    PMCP["Policy MCP<br/><b>lookup_policy</b>"]
+
+    RISKENG["⚙️ Fraud Risk Capability<br/><br/>ML Model<br/>Historical Baselines<br/>SHAP"]
+
+    POLICYENG["📚 Policy RAG Capability<br/><br/>Weaviate Hybrid Search<br/>Cross-Encoder<br/>Qwen"]
+
+    FINAL["📋 Final Orchestrated Response"]
 
     USER --> UI
-    USER --> CLI
+    UI --> ORCH
 
-    UI --> NLP
-    CLI --> NLP
-    NLP --> FORM
-    FORM --> ROUTER
+    ORCH --> RISK
+    ORCH --> POLICY
 
+    RISK -->|score_claim| RMCP
+    POLICY -->|lookup_policy| PMCP
 
-    %% =========================
-    %% MCP LAYER
-    %% =========================
+    RMCP --> RISKENG
+    PMCP --> POLICYENG
 
-    subgraph MCP["⚡ FastMCP Service Layer"]
-        direction TB
-        LAUNCH["🚀 MCP Process Launcher"]
+    RISKENG -->|Risk Result| RISK
+    POLICYENG -->|Policy Result| POLICY
 
-        subgraph SERVICES["Concurrent MCP Services"]
-            direction LR
-            RISK_MCP["🛡️ Risk MCP<br/>score_claim"]
-            POLICY_MCP["📚 Policy MCP<br/>lookup_policy"]
-        end
-    end
+    RISK --> ORCH
+    POLICY --> ORCH
 
-    LAUNCH --> RISK_MCP
-    LAUNCH --> POLICY_MCP
-
-    ROUTER -->|"Claim > 0"| RISK_MCP
-    ROUTER -->|"Claim > 0"| POLICY_MCP
-    ROUTER -->|"Policy Only"| POLICY_MCP
-
-
-    %% =========================
-    %% RISK SYSTEM
-    %% =========================
-
-    subgraph RISK["🛡️ Fraud Risk & Explainability"]
-        direction TB
-
-        RISK_AGENT["Risk Agent"]
-        MODEL["🤖 Fraud Detection Model"]
-        SHAP["📊 SHAP Explainability"]
-
-        RISK_AGENT --> MODEL
-        MODEL --> SHAP
-    end
-
-    RISK_MCP --> RISK_AGENT
-    SHAP -->|"Risk Score + Explanation"| RISK_MCP
-
-
-    %% =========================
-    %% POLICY RAG
-    %% =========================
-
-    subgraph RAG["📚 Policy RAG & Grounded Reasoning"]
-        direction TB
-
-        POLICY_AGENT["Policy Agent"]
-        EMBED["🔢 Sentence Transformer"]
-        DB[("🗄️ Weaviate")]
-        RERANK["🎯 Cross Encoder Reranker"]
-        LLM["🧠 Qwen Local LLM"]
-
-        POLICY_AGENT --> EMBED
-        EMBED --> DB
-        DB --> RERANK
-        RERANK --> LLM
-    end
-
-    POLICY_MCP --> POLICY_AGENT
-    LLM -->|"Grounded Policy Answer"| POLICY_MCP
-
-
-    %% =========================
-    %% RESULT
-    %% =========================
-
-    STATUS["📡 Live MCP Tool Tracking"]
-    RESULT["📋 Consolidated Investigation Result"]
-
-    RISK_MCP --> STATUS
-    POLICY_MCP --> STATUS
-    STATUS --> RESULT
-    RESULT --> USER
-
-
-    %% =========================
-    %% STYLES
-    %% =========================
+    ORCH --> FINAL
+    FINAL --> UI
 
     classDef user fill:#4F46E5,color:#fff,stroke:#312E81,stroke-width:2px;
     classDef client fill:#E0F2FE,color:#0C4A6E,stroke:#0284C7,stroke-width:2px;
-    classDef mcp fill:#DCFCE7,color:#14532D,stroke:#16A34A,stroke-width:2px;
-    classDef risk fill:#FEE2E2,color:#7F1D1D,stroke:#DC2626,stroke-width:2px;
-    classDef rag fill:#FEF3C7,color:#78350F,stroke:#D97706,stroke-width:2px;
-    classDef result fill:#F3E8FF,color:#581C87,stroke:#9333EA,stroke-width:2px;
+    classDef orch fill:#EDE9FE,color:#4C1D95,stroke:#7C3AED,stroke-width:2px;
+    classDef risk fill:#DCFCE7,color:#14532D,stroke:#16A34A,stroke-width:2px;
+    classDef policy fill:#FEF3C7,color:#78350F,stroke:#D97706,stroke-width:2px;
+    classDef mcp fill:#DBEAFE,color:#1E3A8A,stroke:#2563EB,stroke-width:2px;
+    classDef backend fill:#FEE2E2,color:#7F1D1D,stroke:#DC2626,stroke-width:2px;
+    classDef backend2 fill:#FFF7ED,color:#9A3412,stroke:#EA580C,stroke-width:2px;
+    classDef final fill:#F3E8FF,color:#581C87,stroke:#9333EA,stroke-width:2px;
 
     class USER user;
-    class UI,CLI,NLP,FORM,ROUTER client;
-    class LAUNCH,RISK_MCP,POLICY_MCP mcp;
-    class RISK_AGENT,MODEL,SHAP risk;
-    class POLICY_AGENT,EMBED,DB,RERANK,LLM rag;
-    class STATUS,RESULT result;
-
+    class UI client;
+    class ORCH orch;
+    class RISK risk;
+    class POLICY policy;
+    class RMCP,PMCP mcp;
+    class RISKENG backend;
+    class POLICYENG backend2;
+    class FINAL final;
 ```
 
 ---
 
-# AgenticAI_training
+# 2. Architectural Principles
 
-This project implements an end-to-end **Insurance Claims Risk & Investigation Assistant**.
+The architecture separates **reasoning**, **tool access**, and **domain execution**.
 
-The system combines:
+## Orchestrator Agent
 
-* Tabular ML fraud detection
-* Historical claim baselines and feature engineering
-* SHAP explainability
-* LangGraph multi-agent orchestration
-* Hybrid RAG with Weaviate
-* Dense embeddings and BM25 retrieval
-* Cross-encoder reranking
-* Local Qwen LLM generation
-* FastMCP servers and tools
-* Streamlit UI and CLI clients
+The Orchestrator is the central decision-maker.
 
-A user can submit either a natural-language claim description or a structured claim. The system can then assess fraud risk, explain the prediction, retrieve relevant policy information, and return a consolidated investigation result.
+It is responsible for:
+
+* Understanding the user's request
+* Determining whether the request is:
+
+  * `DIRECT`
+  * `RISK`
+  * `POLICY`
+  * `BOTH`
+* Selecting the appropriate specialist agent(s)
+* Running Risk and Policy specialists in parallel when both are required
+* Receiving specialist results
+* Producing the final answer
+
+The Orchestrator **does not directly execute the domain capabilities**.
 
 ---
 
-# 1. High-Level Runtime Flow
+## Risk Specialist Agent
+
+The Risk Specialist handles:
+
+* Fraud detection
+* Claim risk scoring
+* Triage
+* Risk explanation
+* SHAP interpretation
+
+It receives:
+
+* User request
+* Claim details
+* Relevant claim context
+
+It calls:
 
 ```text
-User
-  ↓
-Streamlit UI / Async CLI
-  ↓
-NLP Slot Extraction
-  ↓
-Slot-Filling Refinement
-  ↓
-Auto-Routing
-  │
-  ├── Claim Amount = $0
-  │      ↓
-  │   Policy MCP
-  │      ↓
-  │   Policy Agent
-  │      ↓
-  │   Weaviate Hybrid RAG
-  │      ↓
-  │   Cross-Encoder Reranking
-  │      ↓
-  │   Qwen LLM
-  │
-  └── Claim Amount > $0
-         ↓
-      Risk MCP + Policy MCP
-         │
-         ├── Risk MCP
-         │    ↓
-         │  ML Fraud Scoring
-         │    ↓
-         │  SHAP Explanation
-         │
-         └── Policy MCP
-              ↓
-           Policy RAG
-              ↓
-         Cross-Encoder Reranking
-              ↓
-            Qwen LLM
-              ↓
-       Consolidated Investigation Result
-
+score_claim
 ```
 
-For claim requests, the risk and policy services can run concurrently through `asyncio.gather()`.
+through the Risk MCP service.
 
 ---
 
-# 2. Repository Structure
+## Policy Specialist Agent
 
-The core project contains:
+The Policy Specialist handles:
+
+* Coverage questions
+* Policy limits
+* Exclusions
+* Procedure-related rules
+* Policy/SOP guidance
+
+It receives:
+
+* User policy question
+* Claim type
+* Procedure information
+* Optional claim context
+
+It calls:
+
+```text
+lookup_policy
+```
+
+through the Policy MCP service.
+
+---
+
+# 3. Runtime Request Flow
+
+## 3.1 Risk-only request
+
+Example:
+
+> Is this $25,000 claim suspicious?
+
+```mermaid
+flowchart LR
+
+    A["User"] --> B["Streamlit"]
+    B --> C["Orchestrator"]
+    C --> D["Risk Specialist"]
+    D --> E["Risk MCP<br/>score_claim"]
+    E --> F["Fraud ML + SHAP"]
+    F --> D
+    D --> C
+    C --> G["Final Response"]
+```
+
+---
+
+## 3.2 Policy-only request
+
+Example:
+
+> Is outpatient treatment covered under the policy?
+
+```mermaid
+flowchart LR
+
+    A["User"] --> B["Streamlit"]
+    B --> C["Orchestrator"]
+    C --> D["Policy Specialist"]
+    D --> E["Policy MCP<br/>lookup_policy"]
+    E --> F["Hybrid RAG"]
+    F --> G["Cross-Encoder"]
+    G --> H["Qwen"]
+    H --> D
+    D --> C
+    C --> I["Final Response"]
+```
+
+---
+
+## 3.3 Dual-intent request
+
+Example:
+
+> Assess whether this claim is fraudulent and tell me whether the treatment is covered.
+
+The Orchestrator can invoke both specialists independently.
+
+```mermaid
+flowchart TD
+
+    A["User Request"] --> B["Orchestrator"]
+
+    B --> C["Risk Specialist"]
+    B --> D["Policy Specialist"]
+
+    C --> E["Risk MCP<br/>score_claim"]
+    E --> F["Fraud ML + SHAP"]
+    F --> C
+
+    D --> G["Policy MCP<br/>lookup_policy"]
+    G --> H["Hybrid RAG + Reranking + Qwen"]
+    H --> D
+
+    C --> B
+    D --> B
+
+    B --> I["Final Investigation Response"]
+```
+
+This allows the two specialist paths to execute concurrently when appropriate.
+
+---
+
+# 4. Agent Routing
+
+The Orchestrator uses four logical routes.
+
+```mermaid
+flowchart TD
+
+    A["User Request"] --> B{"Determine Intent"}
+
+    B -->|General in-scope conversation| C["DIRECT"]
+    B -->|Fraud / risk / triage| D["RISK"]
+    B -->|Coverage / policy / SOP| E["POLICY"]
+    B -->|Risk + policy required| F["BOTH"]
+
+    C --> G["Respond Directly"]
+    D --> H["Risk Specialist"]
+    E --> I["Policy Specialist"]
+    F --> J["Risk + Policy Specialists"]
+```
+
+Examples:
+
+| User request                                               | Route    |
+| ---------------------------------------------------------- | -------- |
+| `"Hi"`                                                     | `DIRECT` |
+| `"Is this claim suspicious?"`                              | `RISK`   |
+| `"What is the outpatient coverage limit?"`                 | `POLICY` |
+| `"Is this claim suspicious and is the treatment covered?"` | `BOTH`   |
+
+---
+
+# 5. Specialist Agent Responsibilities
+
+```mermaid
+flowchart LR
+
+    O["Orchestrator"]
+
+    R["Risk Specialist"]
+    P["Policy Specialist"]
+
+    RT["score_claim"]
+    PT["lookup_policy"]
+
+    RE["Risk Capability"]
+    PE["Policy Capability"]
+
+    O --> R
+    O --> P
+
+    R --> RT
+    RT --> RE
+
+    P --> PT
+    PT --> PE
+
+    RE --> R
+    PE --> P
+
+    R --> O
+    P --> O
+```
+
+### Risk Specialist
+
+**Input**
+
+```text
+User task
++
+Claim context
+```
+
+**Action**
+
+```text
+Call score_claim
+Interpret ML + SHAP result
+```
+
+**Output**
+
+```text
+Risk level
+Risk score
+Decision cutoff
+Triage status
+Risk explanation
+```
+
+### Policy Specialist
+
+**Input**
+
+```text
+Policy question
++
+Claim type
++
+Procedure/context
+```
+
+**Action**
+
+```text
+Call lookup_policy
+Interpret retrieved evidence
+```
+
+**Output**
+
+```text
+Grounded policy answer
+Relevant documents
+Source information
+Reranking information
+```
+
+---
+
+# 6. MCP Architecture
+
+MCP is the **capability access layer**.
+
+```mermaid
+flowchart LR
+
+    A["Specialist Agent"]
+
+    B["FastMCP"]
+    C["MCP Tool"]
+
+    D["Backend Capability"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> C
+    C --> B
+    B --> A
+```
+
+MCP is responsible for:
+
+* Tool discovery
+* Tool schemas
+* Input validation
+* Transport
+* Capability invocation
+* Structured responses
+
+MCP is **not responsible for orchestration**.
+
+The MCP server does not decide:
+
+* Which agent should run
+* Which specialist should run next
+* Whether Risk or Policy is required
+* How the final response should be synthesized
+
+Those decisions belong to the agents.
+
+---
+
+# 7. Risk Capability
+
+The Risk MCP exposes:
+
+```text
+score_claim
+```
+
+The underlying capability performs:
+
+```mermaid
+flowchart LR
+
+    A["Claim Input"]
+    B["Feature Engineering"]
+    C["Historical Baselines"]
+    D["Fraud ML Model"]
+    E["Fraud Probability"]
+    F["Decision Threshold"]
+    G["SHAP Explainability"]
+    H["Risk Result"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+```
+
+The risk capability uses information such as:
+
+* Claim amount
+* Patient income
+* Patient age
+* Claim type
+* Procedure code
+* Patient history
+* Provider history
+* Provider specialty
+* Historical claim averages
+* Peer deviation
+* Previous rejected claims
+* Claim frequency
+
+---
+
+# 8. Risk MCP Response
+
+Conceptual response:
+
+```json
+{
+  "claim_id": "CLM-123",
+  "risk_level": "HIGH_RISK",
+  "risk_score": 0.87,
+  "decision_cutoff": 0.42,
+  "triage_status": "HIGH RISK (SUSPICIOUS)",
+  "risk_explanation": "Key model feature impact..."
+}
+```
+
+The actual values are generated by the trained fraud model and SHAP engine.
+
+---
+
+# 9. Policy Capability
+
+The Policy MCP exposes:
+
+```text
+lookup_policy
+```
+
+The policy capability performs:
+
+```mermaid
+flowchart LR
+
+    A["Policy Question"]
+    B["SentenceTransformer"]
+    C["Weaviate Hybrid Search"]
+    D["Candidate Documents"]
+    E["Cross-Encoder Reranking"]
+    F["Relevant Passages"]
+    G["Qwen Grounded Generation"]
+    H["Policy Result"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+```
+
+The policy retrieval system combines:
+
+* Dense semantic retrieval
+* BM25 / keyword retrieval
+* Cross-encoder reranking
+* Grounded LLM generation
+
+The knowledge collection is:
+
+```text
+InsuranceKnowledge
+```
+
+---
+
+# 10. Policy MCP Response
+
+Conceptual response:
+
+```json
+{
+  "question": "Is outpatient treatment covered?",
+  "answer": "Grounded policy answer...",
+  "retrieved_docs": [
+    {
+      "source_file": "coverage_rules.pdf",
+      "category": "Outpatient",
+      "snippet": "...",
+      "rerank_score": 91.4
+    }
+  ]
+}
+```
+
+Policy answers should be grounded in retrieved policy evidence.
+
+---
+
+# 11. Final Response Synthesis
+
+Specialist outputs return to the Orchestrator.
+
+```mermaid
+flowchart TD
+
+    A["Risk Specialist Result"]
+    B["Policy Specialist Result"]
+
+    C["Orchestrator"]
+
+    D["Final Investigation Response"]
+
+    A --> C
+    B --> C
+    C --> D
+```
+
+For a dual-intent investigation, the final answer can contain:
+
+```text
+Fraud Risk Triage
+-----------------
+Risk Level: HIGH_RISK
+Risk Score: 87%
+
+Key Risk Drivers:
+...
+
+Policy Coverage & Limits
+------------------------
+Coverage:
+...
+
+Sources:
+- coverage_rules.pdf
+- policy_guidelines.pdf
+```
+
+---
+
+# 12. Technology Stack
+
+| Layer               | Technology                     |
+| ------------------- | ------------------------------ |
+| UI                  | Streamlit                      |
+| Agent orchestration | LangGraph                      |
+| Agent LLM           | OpenAI-compatible LLM / Ollama |
+| MCP framework       | FastMCP                        |
+| Fraud model         | XGBoost / LightGBM             |
+| Explainability      | SHAP                           |
+| Feature engineering | Pandas / NumPy                 |
+| Embeddings          | Sentence Transformers          |
+| Vector database     | Weaviate                       |
+| Retrieval           | Hybrid Dense + BM25            |
+| Reranking           | Cross-Encoder                  |
+| Policy generation   | Qwen2.5-1.5B-Instruct          |
+| Model artifacts     | Joblib                         |
+| Environment         | Python / Docker                |
+
+---
+
+# 13. Repository Structure
 
 ```text
 AgenticAI_training/
 │
 ├── Health Insurance Fraud Claims.xlsx
+│
 ├── train_fraud_model.py
-├── insurance_multi_agent_chunking_indexing_copy_2.py
-├── insurance_risk_server.py
-├── insurance_policy_server.py
-├── start_insurance_mcp.py
-├── insurance_multi_agent_client.py
-├── streamlit_app.py
-├── generate_rag_pdf.py
+├── insurance_multi_agent_chunking_indexing.py
+├── insurance_mcp_server.py
+├── app_chat.py
+├── generate_rag_pdfs.py
+├── docker-compose.yml
+├── requirements.txt
 ├── README.md
+│
+├── rag/
+│   └── documents/
+│       └── *.pdf
 │
 └── output/
     ├── fraud_detection_model.pkl
     └── processed_claim_features.csv
-
 ```
 
 ---
 
-# 3. Clone or Fork the Repository
+# 14. File Responsibilities
 
-## 3.1 Clone
+| File                                         | Responsibility                                                                                        |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `app_chat.py`                                | Streamlit UI, Orchestrator Agent, Risk Specialist, Policy Specialist, MCP clients and final synthesis |
+| `insurance_mcp_server.py`                    | FastMCP server exposing `score_claim` and `lookup_policy`                                             |
+| `insurance_multi_agent_chunking_indexing.py` | Fraud and policy capability implementations                                                           |
+| `train_fraud_model.py`                       | Fraud-model training, feature engineering and SHAP artifact generation                                |
+| `generate_rag_pdfs.py`                       | Generates sample policy documents for RAG                                                             |
+| `Health Insurance Fraud Claims.xlsx`         | Historical claims dataset                                                                             |
+| `output/fraud_detection_model.pkl`           | Trained ML runtime artifact                                                                           |
+| `output/processed_claim_features.csv`        | Processed claims data                                                                                 |
+| `rag/documents/`                             | Policy documents used by RAG                                                                          |
+
+---
+
+# 15. Installation
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/tigersb06/AgenticAI_training.git
 cd AgenticAI_training
-
 ```
 
-## 3.2 Fork
+Create a virtual environment.
 
-To maintain your own GitHub copy:
-
-1. Open the repository on GitHub.
-2. Click **Fork**.
-3. Select your GitHub account.
-4. Clone your fork:
+### Linux / macOS
 
 ```bash
-git clone https://github.com/<YOUR_USERNAME>/AgenticAI_training.git
-cd AgenticAI_training
-
+python3 -m venv venv
+source venv/bin/activate
 ```
 
-Optional: add the original repository as `upstream`:
+### Windows
 
 ```bash
-git remote add upstream https://github.com/tigersb06/AgenticAI_training.git
-git remote -v
-
+python -m venv venv
+venv\Scripts\activate
 ```
 
----
-
-# 4. Create a Python Environment
-
-A clean virtual environment is recommended.
-
-## Windows
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate
-
-```
-
-## macOS / Linux
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-```
-
-Upgrade `pip`:
+Upgrade pip:
 
 ```bash
 python -m pip install --upgrade pip
-
 ```
 
----
-
-# 5. Install Dependencies
-
-Install the project dependencies from `requirements.txt`:
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
-
-```
-
-The environment covers the major components used by the project, including:
-
-```text
-pandas
-numpy
-scikit-learn
-xgboost
-lightgbm
-shap
-joblib
-weaviate-client
-sentence-transformers
-langgraph
-transformers
-streamlit
-fastmcp
-pypdf
-
 ```
 
 ---
 
-# 6. Start Weaviate
+# 16. Start Weaviate
 
-The policy RAG system depends on a running local Weaviate instance.
+The Policy capability requires Weaviate.
 
-Check Docker:
-
-```bash
-docker --version
-docker ps
-
-```
-
-If your existing Weaviate container already exists:
-
-```bash
-docker start <weaviate-container-name>
-
-```
-
-If the project uses Docker Compose:
+Using Docker Compose:
 
 ```bash
 docker compose up -d
-
 ```
 
-Verify that the container is running:
+Verify:
 
 ```bash
 docker ps
-
 ```
 
-Weaviate needs to be available before the policy RAG service is started.
-
-The RAG system uses a collection named:
+The policy RAG system expects:
 
 ```text
 InsuranceKnowledge
-
 ```
+
+as the knowledge collection.
 
 ---
 
-# 7. Prepare the RAG Knowledge Base
+# 17. Prepare Policy Documents
 
-The policy agent requires policy documents.
-
-There are two ways to prepare them.
-
-## Option A — Generate the RAG PDFs
-
-Run the project's PDF generation utility:
+Generate the sample policy PDFs:
 
 ```bash
-python generate_rag_pdf.py
-
+python generate_rag_pdfs.py
 ```
 
-## Option B — Add PDFs Manually
+Or place your own documents in:
 
-Place policy PDFs in the RAG documents directory, for example:
+```text
+rag/documents/
+```
+
+Example:
 
 ```text
 rag/
@@ -395,311 +736,415 @@ rag/
     ├── coverage_rules.pdf
     ├── exclusions.pdf
     ├── claim_limits.pdf
-    ├── required_documentation.pdf
-    └── policy_guidelines.pdf
-
+    ├── policy_guidelines.pdf
+    └── documentation_requirements.pdf
 ```
 
 ---
 
-# 8. Train the Fraud Detection Model
+# 18. Train the Fraud Model
 
 Run:
 
 ```bash
 python train_fraud_model.py
-
 ```
 
-The training script reads:
+Input:
 
 ```text
 Health Insurance Fraud Claims.xlsx
-
 ```
 
-and builds the ML artifacts used during runtime under `output/`:
+Generated runtime artifacts:
 
 ```text
 output/
 ├── fraud_detection_model.pkl
 └── processed_claim_features.csv
-
 ```
 
-Train the fraud model **before starting the FastMCP services or Streamlit app**.
+The trained artifact must exist before Risk MCP is used.
 
 ---
 
-# 9. Build or Refresh the RAG Index
-
-Once the PDFs are available, run the project's chunking and indexing pipeline:
-
-```bash
-python insurance_multi_agent_chunking_indexing_copy_2.py
-
-```
-
-The indexing flow is:
-
-```text
-Policy PDFs
-    ↓
-Chunking
-    ↓
-SentenceTransformer
-(all-MiniLM-L6-v2)
-    ↓
-Weaviate
-(InsuranceKnowledge)
-
-```
-
-At query time, retrieval follows:
-
-```text
-User Query
-    ↓
-Hybrid Search
-(Dense + BM25)
-    ↓
-Cross-Encoder Reranking
-    ↓
-Qwen LLM Synthesizer
-
-```
-
----
-
-# 10. Start the Insurance MCP Services
-
-Launch both FastMCP microservices using the launcher script:
-
-```bash
-python start_insurance_mcp.py
-
-```
-
-Expected service mapping:
-
-| Service | Port | Tool |
-| --- | --- | --- |
-| Insurance Risk MCP Server | 8011+ | `score_claim` |
-| Insurance Policy MCP Server | 8012+ | `lookup_policy` |
-
-The launcher is responsible for starting and monitoring the MCP services.
-
----
-
-# 11. Run the Application
-
-## 11.1 Streamlit Web Dashboard
-
-**Recommended**
-
-In a separate terminal, with the virtual environment activated:
-
-```bash
-streamlit run streamlit_app.py
-
-```
-
-Features include:
-
-* Natural-language claim input
-* Automatic NLP slot extraction
-* Slot-filling refinement
-* Auto-routing between policy-only and claim workflows
-* Real-time `st.status()` progress tracking
-* MCP tool execution tracking
-* Interactive SHAP feature contributions
-* Grounded policy document excerpts
-* Consolidated investigation output
-
----
-
-## 11.2 Async CLI Client
-
-Alternatively, run the interactive CLI:
-
-```bash
-python insurance_multi_agent_client.py
-
-```
-
-The CLI supports:
-
-* Natural-language claim input
-* Slot extraction
-* Automatic routing
-* Risk MCP calls
-* Policy MCP calls
-* Consolidated results
-
----
-
-# 12. Recommended Startup Order
-
-Follow this order for a clean end-to-end run.
-
-### Step 1 — Start Weaviate
-
-```bash
-docker start <weaviate-container-name>
-
-```
-
-Or:
-
-```bash
-docker compose up -d
-
-```
-
----
-
-### Step 2 — Train the Fraud ML Model
-
-```bash
-python train_fraud_model.py
-
-```
-
-This creates:
-
-```text
-output/fraud_detection_model.pkl
-
-```
-
----
-
-### Step 3 — Build or Refresh the Policy RAG Index
-
-Generate the policy PDFs:
-
-```bash
-python generate_rag_pdf.py
-
-```
-
-Then index them:
-
-```bash
-python insurance_multi_agent_chunking_indexing_copy_2.py
-
-```
-
----
-
-### Step 4 — Launch FastMCP Services
-
-```bash
-python start_insurance_mcp.py
-
-```
-
-Keep this process running.
-
----
-
-### Step 5 — Run the UI or CLI Client
-
-For Streamlit:
-
-```bash
-streamlit run streamlit_app.py
-
-```
-
-Or for the CLI:
-
-```bash
-python insurance_multi_agent_client.py
-
-```
-
----
-
-# 13. Component Directory & File Responsibilities
-
-| Component / File | Responsibility |
-| --- | --- |
-| `Health Insurance Fraud Claims.xlsx` | Raw historical claims dataset |
-| `train_fraud_model.py` | Feature engineering, XGBoost/LightGBM training, SHAP explainer creation |
-| `insurance_multi_agent_chunking_indexing_copy_2.py` | LangGraph multi-agent backend, Weaviate hybrid search, Qwen LLM synthesis |
-| `insurance_risk_server.py` | FastMCP server for the `score_claim` tool |
-| `insurance_policy_server.py` | FastMCP server for the `lookup_policy` tool |
-| `start_insurance_mcp.py` | Orchestrator, free-port finder, and MCP health-check launcher |
-| `insurance_multi_agent_client.py` | Async CLI client with NLP slot extraction and auto-routing |
-| `streamlit_app.py` | Web dashboard with real-time MCP tool tracking and parameter refinement |
-| `generate_rag_pdf.py` | Utility to generate standard policy PDFs for RAG indexing |
-| `output/fraud_detection_model.pkl` | Trained ML pipeline artifact required at runtime |
-| `output/processed_claim_features.csv` | Processed feature dataset generated during model training |
-
----
-
-# 14. Common Problems & Fixes
-
-## `FileNotFoundError: output/fraud_detection_model.pkl`
+# 19. Build the RAG Index
 
 Run:
 
 ```bash
-python train_fraud_model.py
-
+python insurance_multi_agent_chunking_indexing.py
 ```
 
-This generates the required model artifacts.
+Conceptually:
+
+```mermaid
+flowchart LR
+
+    A["Policy PDFs"]
+    B["Text Extraction"]
+    C["Chunking"]
+    D["Embeddings"]
+    E["Weaviate"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+```
+
+Runtime retrieval:
+
+```mermaid
+flowchart LR
+
+    A["Policy Question"]
+    B["Hybrid Retrieval"]
+    C["Cross-Encoder"]
+    D["Qwen"]
+    E["Grounded Answer"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+```
 
 ---
 
-## `Failed to connect to [http://127.0.0.1:8011/mcp](http://127.0.0.1:8011/mcp)`
+# 20. Start FastMCP
 
-Make sure the MCP services are running:
+Start the MCP service:
 
 ```bash
-python start_insurance_mcp.py
-
+python insurance_mcp_server.py
 ```
 
-Keep the MCP launcher running in a separate terminal.
-
-If dynamic ports were assigned, check the launcher output and update the server endpoints used by the client/UI if necessary.
-
----
-
-## Empty or Irrelevant Policy RAG Answers
-
-Verify that:
-
-1. Weaviate Docker is running.
-2. The policy PDFs exist.
-3. `generate_rag_pdf.py` has been executed if required.
-4. `insurance_multi_agent_chunking_indexing_copy_2.py` has been executed.
-5. The `InsuranceKnowledge` collection exists.
-6. The Policy MCP server is running.
-
----
-
-# Core Technologies
+Default endpoint:
 
 ```text
-Python
-Pandas / NumPy
-Scikit-learn
-XGBoost
-LightGBM
-SHAP
-Joblib
-Sentence Transformers
-Weaviate
-LangGraph
-Transformers
-Qwen2.5-1.5B-Instruct
-Cross-Encoder
-Streamlit
-FastMCP
-Docker
-
+http://127.0.0.1:8011/mcp
 ```
+
+Available tools:
+
+```text
+score_claim
+lookup_policy
+```
+
+The MCP server should remain running while the application is active.
+
+---
+
+# 21. Start Streamlit
+
+In another terminal:
+
+```bash
+streamlit run app_chat.py
+```
+
+The UI provides:
+
+* Natural-language interaction
+* Agent routing
+* Risk analysis
+* Policy analysis
+* Dual-intent execution
+* MCP tool execution tracing
+* Final response synthesis
+
+---
+
+# 22. Recommended Startup Order
+
+```mermaid
+flowchart TD
+
+    A["1. Activate Python Environment"]
+    B["2. Start Weaviate"]
+    C["3. Train Fraud Model"]
+    D["4. Prepare Policy Documents"]
+    E["5. Build RAG Index"]
+    F["6. Start Insurance MCP Server"]
+    G["7. Start Streamlit"]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+```
+
+Commands:
+
+```bash
+source venv/bin/activate
+
+docker compose up -d
+
+python train_fraud_model.py
+
+python generate_rag_pdfs.py
+
+python insurance_multi_agent_chunking_indexing.py
+
+python insurance_mcp_server.py
+```
+
+Then, in another terminal:
+
+```bash
+source venv/bin/activate
+streamlit run app_chat.py
+```
+
+---
+
+# 23. MCP Tools
+
+## `score_claim`
+
+Purpose:
+
+```text
+Fraud risk scoring and explainability
+```
+
+Typical inputs include:
+
+```text
+claim_amount
+patient_income
+patient_age
+claim_type
+claim_id
+procedure_code
+patient_id
+provider_id
+provider_specialty
+diagnosis_code
+provider_location
+claim_status
+claim_submission_method
+previously_rejected_claims
+num_claims_last_12m
+```
+
+Returns:
+
+```text
+risk_level
+risk_score
+decision_cutoff
+triage_status
+risk_explanation
+```
+
+---
+
+## `lookup_policy`
+
+Purpose:
+
+```text
+Policy retrieval and grounded policy synthesis
+```
+
+Typical inputs:
+
+```text
+question
+claim_type
+procedure_code
+```
+
+Returns:
+
+```text
+answer
+retrieved_docs
+source information
+reranking information
+```
+
+---
+
+# 24. Agent Input / Output Summary
+
+| Agent             | Input                      | MCP Tool          | Output                            |
+| ----------------- | -------------------------- | ----------------- | --------------------------------- |
+| Orchestrator      | User query + claim context | Specialist agents | Final response                    |
+| Risk Specialist   | Risk task + claim details  | `score_claim`     | Risk result + explanation         |
+| Policy Specialist | Policy question + context  | `lookup_policy`   | Grounded policy result + evidence |
+
+---
+
+# 25. Architecture Rule
+
+The core design principle is:
+
+```mermaid
+flowchart LR
+
+    A["Orchestrator"]
+    B["Specialist Agent"]
+    C["MCP Tool"]
+    D["Backend Capability"]
+
+    A -->|"Decides WHO"| B
+    B -->|"Decides WHICH capability"| C
+    C -->|"Invokes"| D
+    D -->|"Returns result"| C
+    C --> B
+    B --> A
+```
+
+### In one line:
+
+> **Agent decides → MCP invokes → backend executes → Agent interprets → Orchestrator synthesizes**
+
+The architecture intentionally avoids:
+
+```text
+MCP → Agent
+```
+
+and instead uses:
+
+```text
+Orchestrator → Specialist Agent → MCP → Capability
+```
+
+---
+
+# 26. Error Handling
+
+## Missing Fraud Model
+
+If the application reports that:
+
+```text
+output/fraud_detection_model.pkl
+```
+
+is missing, run:
+
+```bash
+python train_fraud_model.py
+```
+
+---
+
+## MCP Connection Error
+
+Ensure:
+
+```bash
+python insurance_mcp_server.py
+```
+
+is running.
+
+Verify the endpoint:
+
+```text
+http://127.0.0.1:8011/mcp
+```
+
+---
+
+## Weaviate Connection Error
+
+Check Docker:
+
+```bash
+docker ps
+```
+
+Ensure the Weaviate container is running.
+
+---
+
+## Empty Policy Results
+
+Check:
+
+* Weaviate is running
+* Policy documents exist
+* RAG indexing has been executed
+* `InsuranceKnowledge` exists
+* `lookup_policy` is available through MCP
+
+---
+
+# 27. Production Considerations
+
+For production deployment, consider:
+
+* MCP authentication
+* Tool-level authorization
+* API-key / secret management
+* Request IDs and correlation IDs
+* Structured logging
+* MCP audit logging
+* Rate limiting
+* Model version tracking
+* RAG document versioning
+* Model drift monitoring
+* Retrieval-quality monitoring
+* Human approval for high-risk claims
+* Data privacy controls
+
+The current implementation is primarily an end-to-end architecture and working prototype.
+
+---
+
+# 28. Final Architecture Summary
+
+```mermaid
+flowchart LR
+
+    U["👤 User"]
+    UI["🖥️ Streamlit"]
+
+    O["🧠 Orchestrator"]
+
+    R["🛡️ Risk Specialist"]
+    P["📚 Policy Specialist"]
+
+    RM["Risk MCP<br/>score_claim"]
+    PM["Policy MCP<br/>lookup_policy"]
+
+    RF["Fraud ML + SHAP"]
+    PR["Policy RAG + Reranking + Qwen"]
+
+    O --> R
+    O --> P
+
+    R --> RM
+    P --> PM
+
+    RM --> RF
+    PM --> PR
+
+    RF --> R
+    PR --> P
+
+    R --> O
+    P --> O
+
+    U --> UI
+    UI --> O
+    O --> UI
+```
+
+## Core Principle
+
+> **The Orchestrator decides which specialist should work.
+> The Specialist Agent decides which capability it needs.
+> MCP exposes that capability as a tool.
+> The backend performs the work.
+> The result returns to the Specialist, then to the Orchestrator for final synthesis.**
