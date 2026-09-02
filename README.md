@@ -1,5 +1,7 @@
 # Multi-Agent Insurance MCP Architecture
 
+![alt text](image.png)
+
 An end-to-end **Insurance Claims Risk & Investigation Assistant** that combines:
 
 * Multi-agent orchestration with **LangGraph**

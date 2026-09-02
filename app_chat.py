@@ -276,6 +276,7 @@ Rules:
 - State when evidence is unavailable or a specialist encountered an error.
 - Do not expose internal agent/tool routing details unless useful for transparency.
 - Do not ask follow-up questions unless the user explicitly asks for an interactive workflow.
+- Keep it brief.
 """
 
 
@@ -346,6 +347,8 @@ async def execute_request(llm, user_query: str) -> Dict[str, Any]:
                     content=(
                         "You are ClaimsAI, a health-insurance assistant. "
                         "Answer the user's conversational request directly and stay in scope."
+                        "Respond strictly and exclusively to insurance domain queries (policies, risk assessment, claims, and regulations);"
+                        "Immediately decline all off-topic general chat, creative writing, songs, and non-insurance requests."
                     )
                 ),
                 HumanMessage(content=user_query),
