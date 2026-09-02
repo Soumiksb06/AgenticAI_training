@@ -6,7 +6,7 @@
 ![alt text](image-3.png)
 ![alt text](image-4.png)
 
-<video controls src="https://raw.githubusercontent.com/tigersb06/AgenticAI_training/insurance-mcp-architecture/streamlit-app_chat-2026-09-02-20-08-31.webm" title="Title"></video>
+<video controls src="streamlit-app_chat-2026-09-02-20-08-31-900p.webm" title="Title"></video>
 
 An end-to-end **Insurance Claims Risk & Investigation Assistant** that combines:
 
