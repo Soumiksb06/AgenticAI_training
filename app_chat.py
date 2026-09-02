@@ -276,7 +276,7 @@ Rules:
 - State when evidence is unavailable or a specialist encountered an error.
 - Do not expose internal agent/tool routing details unless useful for transparency.
 - Do not ask follow-up questions unless the user explicitly asks for an interactive workflow.
-- Keep it brief.
+- Keep it brief, write in well formatted markdown.
 """
 
 
