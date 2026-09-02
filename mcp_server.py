@@ -16,7 +16,7 @@ from typing import Any, Dict
 
 from fastmcp import FastMCP
 
-from backend_new import (
+from backend import (
     lookup_policy_capability,
     score_claim_capability,
 )
