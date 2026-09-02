@@ -1,6 +1,12 @@
 # Multi-Agent Insurance MCP Architecture
 
+![alt text](image-1.png)
 ![alt text](image.png)
+![alt text](image-2.png)
+![alt text](image-3.png)
+![alt text](image-4.png)
+
+<video controls src="streamlit-app_chat-2026-09-02-20-08-31.webm" title="Title"></video>
 
 An end-to-end **Insurance Claims Risk & Investigation Assistant** that combines:
 
