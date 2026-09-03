@@ -257,11 +257,21 @@ Choose exactly one route:
 Return ONLY JSON in this exact shape:
 {"route":"DIRECT|RISK|POLICY|BOTH","reason":"brief reason"}
 
-Routing rules:
-- If a numerical claim is provided and the user asks whether it is suspicious/fraudulent/risky -> RISK.
-- If the user asks about policy coverage or limits without risk -> POLICY.
-- If both risk and coverage/limits are requested -> BOTH.
-- A claim amount alone implies RISK when the user asks to assess/evaluate/investigate it.
+Intent rules:
+- Identify risk intent and policy intent independently; do not force the request into only one category.
+- Risk intent includes fraud, suspiciousness, risk, score, triage, investigation, assessment, evaluation, and requests containing claim facts to be assessed (for example amount, income, age, diagnosis, procedure, provider, status, or claim ID).
+- Policy intent includes coverage, eligibility, payable/reimbursable amounts, maximum or minimum limits, exclusions, benefits, deductibles, copays, authorization, policy rules, and SOP guidance.
+- A question asking what amount is possible/allowed/payable for a supplied claim is policy intent, even if it does not use the words coverage or policy.
+- If risk intent and policy intent are both present, ALWAYS choose BOTH. BOTH has precedence over RISK and POLICY.
+- Choose DIRECT only for greetings, identity, or clearly non-specialist insurance conversation with no claim assessment and no policy fact lookup.
+- Never infer a route from one isolated keyword; interpret the complete user request and all supplied claim fields.
+- Never call score_claim or lookup_policy yourself.
+
+Examples:
+- "Is this claim suspicious? amount 4000, income 45000" -> RISK
+- "What is the maximum payable amount for claim 4000?" -> BOTH when claim facts are supplied; otherwise POLICY
+- "claim/money/rs/dollars 4000, income/salary/... 45000, age 34, max amount claim possible/any query from policies?" -> BOTH
+- "Is outpatient treatment covered?" -> POLICY
 - Never call score_claim or lookup_policy yourself.
 """
 
@@ -299,24 +309,80 @@ def parse_route(text: str) -> Dict[str, str]:
         except json.JSONDecodeError:
             pass
 
-    upper = text.upper()
-    if "BOTH" in upper:
-        return {"route": "BOTH", "reason": "Detected risk and policy intents."}
-    if "RISK" in upper:
-        return {"route": "RISK", "reason": "Detected risk intent."}
-    if "POLICY" in upper:
-        return {"route": "POLICY", "reason": "Detected policy intent."}
     return {"route": "DIRECT", "reason": "No specialist route detected."}
 
 
-async def route_query(llm, user_query: str) -> Dict[str, str]:
-    response = await llm.ainvoke(
-        [
-            SystemMessage(content=ORCHESTRATOR_ROUTER_PROMPT),
-            HumanMessage(content=user_query),
-        ]
+def infer_query_intents(user_query: str) -> Dict[str, bool]:
+    """Detect clear specialist signals before relying on model classification."""
+    query = user_query.casefold()
+    risk_terms = (
+        r"fraud|fraudulent|suspicious|suspicion|risk|risky|score|triage|"
+        r"investigat|assess|evaluat|red flag|anomal|claim review"
     )
-    return parse_route(str(response.content))
+    policy_terms = (
+        r"cover|eligible|eligibility|reimburse|payable|maximum|minimum|"
+        r"max(?:imum)?\s+(?:amount|limit)|limit|benefit|exclude|deductible|"
+        r"copay|co-pay|authorization|authorisation|policy|sop|allowed|"
+        r"claimable|how much.*claim|amount.*claim.*possible"
+    )
+    claim_field_terms = (
+        r"claim\s*(?:amount|id|number|type|status)|income|patient|age|"
+        r"diagnosis|procedure|provider|specialty|previously rejected|"
+        r"claims?\s+last\s+12\s*months?"
+    )
+
+    has_risk_language = re.search(risk_terms, query) is not None
+    has_policy_language = re.search(policy_terms, query) is not None
+    has_claim_facts = re.search(claim_field_terms, query) is not None
+
+    risk_intent = has_risk_language or (
+        has_claim_facts and re.search(r"\d", query) is not None
+    )
+    return {
+        "risk": risk_intent,
+        "policy": has_policy_language,
+        "claim_facts": has_claim_facts,
+    }
+
+
+async def route_query(llm, user_query: str) -> Dict[str, str]:
+    intents = infer_query_intents(user_query)
+
+    if intents["risk"] and intents["policy"]:
+        deterministic_route = {
+            "route": "BOTH",
+            "reason": "Detected claim assessment and policy-limit intent.",
+        }
+    elif intents["risk"]:
+        deterministic_route = {
+            "route": "RISK",
+            "reason": "Detected claim assessment or risk intent.",
+        }
+    elif intents["policy"]:
+        deterministic_route = {
+            "route": "POLICY",
+            "reason": "Detected coverage, limit, or policy intent.",
+        }
+    else:
+        deterministic_route = None
+
+    try:
+        response = await llm.ainvoke(
+            [
+                SystemMessage(content=ORCHESTRATOR_ROUTER_PROMPT),
+                HumanMessage(content=user_query),
+            ]
+        )
+        model_route = parse_route(str(response.content))
+    except Exception:
+        return deterministic_route or {
+            "route": "DIRECT",
+            "reason": "No specialist route detected.",
+        }
+
+    if deterministic_route:
+        return deterministic_route
+    return model_route
 
 
 async def run_risk_specialist(llm, user_query: str) -> Dict[str, Any]:
